@@ -94,6 +94,10 @@ _CHROME_RES = [
     # A FULLY boxed row (both ends │); code-gutter lines have a leading │ only.
     re.compile(r"^\s*│.*│\s*$"),
     re.compile(r">_ OpenAI Codex|/model to change|permissions:\s*YOLO", re.I),
+    # Tool-execution noise: the command/source gutter ("│ …") and elision markers
+    # ("… +N lines") eat the transcript_tail budget without being agent content.
+    re.compile(r"^\s*│"),
+    re.compile(r"^\s*…?\s*\+\d+ lines"),
     # Codex's own internal skill-file reads — noise, not the user's task activity.
     re.compile(r"superpowers:|using-superpowers|executing-plans|verification-before-completion", re.I),
     # our own injected completion-contract boilerplate, echoed back in history.
@@ -116,6 +120,15 @@ _UNCERTAINTY_RE = re.compile(
 _STATUSBAR_RE = re.compile(r"gpt-[\d.]+.*(Context|window|used)|Context\s+\d+%\s+used", re.I)
 # The composer input prompt glyph at the start of the input line.
 _PROMPT_RE = re.compile(r"^\s*[›>]\s?")
+# A confident, PAST-tense completion statement — the fallback completion signal
+# when Codex finishes WITHOUT printing the marker (it frequently reports in prose
+# instead, ~60% of the time observed). Future/intent phrasing is excluded so this
+# only fires on a genuine, settled turn-end.
+_DONE_RE = re.compile(
+    r"\b(created|added|wrote|implemented|updated|finished|completed|verified|"
+    r"all set|successfully|task (is )?(complete|done))\b", re.I)
+_INTENT_RE = re.compile(
+    r"\b(i'?ll|i will|let me|going to|i'?m going|will now|plan to|next[,:]|then i)\b", re.I)
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +514,18 @@ def _marker_on_own_line(marker, tail):
     return False
 
 
+def _looks_done(text):
+    """A confident, past-tense completion statement near the bottom — the fallback
+    when Codex finishes without printing the marker. Skips future/intent lines
+    ("I'll create…") so it only fires on a real, settled turn-end."""
+    for ln in _bottom(text, 6):
+        if _INTENT_RE.search(ln):
+            continue
+        if _DONE_RE.search(ln):
+            return True
+    return False
+
+
 def _parse_options(tail):
     """Extract numbered menu options from the bottom of the screen.
     Returns [{key,label,recommended}]. recommended = the ›-marked / (Recommended) one."""
@@ -560,10 +585,13 @@ def _extract_plan(tail):
     return text or None
 
 
-def _clean_tail(tail, keep=12, marker=None):
-    """Strip TUI chrome and keep the agent's real last message (token-efficient).
-    Drops the composer placeholder line and the bare completion-marker echo —
-    both are signalled elsewhere in the envelope and would only add noise."""
+def _clean_tail(tail, keep=28, marker=None):
+    """Strip TUI chrome and keep the agent's real last message. `keep` is high
+    enough that a detailed end-of-task report survives (the goal is the agent's
+    FULL final message, not a fixed snippet), but bounded so a runaway transcript
+    can't bloat the envelope. Tool gutters / elisions / chrome are stripped first,
+    so the budget goes to actual content. Drops the composer placeholder and the
+    bare completion-marker echo — both are signalled elsewhere."""
     kept = []
     drop_cont = False   # inside a wrapped ›-echo block: drop its continuation lines
     for ln in tail.splitlines():
@@ -598,7 +626,18 @@ def _clean_tail(tail, keep=12, marker=None):
             blank = False
         out.append(ln)
     lines = "\n".join(out).strip().splitlines()
-    return "\n".join(lines[-keep:])
+    # Prefer the agent's FINAL MESSAGE: the last "•" bullet and its continuation
+    # lines (its summary/report). Codex precedes the summary with the file diff
+    # and a tool-command log; anchoring on the last bullet keeps a detailed report
+    # intact while excluding that preamble — answering both "all needed content"
+    # and "not bloated". Bounded by `keep`. No bullet (a question/menu turn) ->
+    # fall back to the last `keep` lines.
+    last_bullet = None
+    for i, ln in enumerate(lines):
+        if ln.lstrip()[:1] == "•":
+            last_bullet = i
+    block = lines[last_bullet:] if last_bullet is not None else lines
+    return "\n".join(block[-keep:])
 
 
 def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="codex.py"):
@@ -680,6 +719,16 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
             summary = "Expected artifacts exist (no marker printed)."
             next_action = _na("verify", f"status --session <id>",
                               "No completion marker, but expected files exist — confirm content.")
+        elif _looks_done(bottom):
+            # Codex often finishes without printing the marker, reporting in prose
+            # instead. With no marker AND no --expect this would otherwise read as
+            # no_signal for a SUCCESSFUL task; a confident past-tense completion
+            # line rescues it as a (verify-me) completion rather than a dead end.
+            state, reason = "completed", "reported_done"
+            summary = "Codex reported the task done (no marker printed)."
+            next_action = _na("verify", f"status --session <id>",
+                              "No marker, but the agent's last message reports completion — "
+                              "verify the result before trusting (pass --expect for a hard check).")
         else:
             state, reason = "no_signal", "no_signal"
             summary = "Turn ended with no completion marker, question, or menu."

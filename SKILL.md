@@ -79,7 +79,7 @@ Between step 1 and the notification you are **free to do other work** — answer
 { "ok": true, "schema_version": "v1", "command": "start", "session": "cdx-3f9a",
   "result": {
     "state":  "completed|awaiting_clarification|awaiting_approval|permission_gate|working|no_signal|exited",
-    "reason": "marker_verified|marker_unverified|artifacts_present|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
+    "reason": "marker_verified|marker_unverified|artifacts_present|reported_done|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
     "summary": "<=200 chars: what happened",
     "plan": "<full plan text — NEVER truncated — when present>",
     "questions": ["…"], "options": [{"key":"1","label":"…","recommended":true}],
@@ -97,6 +97,7 @@ Read the table, then act on `next_action`:
 | `completed` / `marker_verified` | Marker printed **and** every `--expect` artifact exists | Done. `end` the session. |
 | `completed` / `marker_unverified` | Marker printed but a promised file is **missing** | Verify before trusting — read `transcript_tail`; maybe `send` a fix. |
 | `completed` / `artifacts_present` | No marker, but expected files exist | Confirm content; usually done. |
+| `completed` / `reported_done` | No marker/`--expect`, but the agent's last message reports it finished | Verify — read `transcript_tail`; pass `--expect` next time for a hard check. |
 | `awaiting_clarification` / `free_text_question` | Codex asked a question (turn ended at idle) | `reply --text "<answer>"` — `result.questions` lists them. |
 | `awaiting_clarification` / `multiple_choice` | A pick-one menu, or Codex's blocked "Question N/N … submit" widget | `reply --choice N` — `result.options` lists keys. |
 | `awaiting_approval` / `plan_approval` | Plan-mode approval menu | `reply --approve` (or `--reject` to keep planning). Plan is in `result.plan`. |

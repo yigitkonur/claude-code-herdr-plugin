@@ -107,7 +107,7 @@ Pure JSON on stdout, one stable envelope:
 { "ok": true, "schema_version": "v1", "command": "start", "session": "cdx-3f9a",
   "result": {
     "state":  "completed|awaiting_clarification|awaiting_approval|permission_gate|working|no_signal|exited",
-    "reason": "marker_verified|marker_unverified|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
+    "reason": "marker_verified|marker_unverified|artifacts_present|reported_done|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
     "summary": "<=200 chars",
     "plan": "<full plan text — never truncated — when awaiting approval>",
     "questions": ["…"], "options": [{"key":"1","label":"…","recommended":true}],

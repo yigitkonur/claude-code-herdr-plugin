@@ -79,6 +79,17 @@ case("artifacts_present", "done",
      f"All set, wrote the file.\n› Find and fix a bug\n{STATUSBAR}",
      None, [existing.name], "completed", "artifacts_present", "verify")
 
+# 12. completed / reported_done — no marker, no --expect, but a confident done line
+# (Codex skips the marker ~60% of the time; this rescues a success from no_signal.)
+case("reported_done", "done",
+     f"• Added /tmp/x.py (+2 -0)\n• Created /tmp/x.py with add(a, b) and verified it works.\n{STATUSBAR}",
+     MARK, [], "completed", "reported_done", "verify")
+
+# 13. no_signal — a FUTURE/intent line must NOT be mistaken for completion
+case("intent_not_done", "done",
+     f"I'll create the file and verify it next.\n{STATUSBAR}",
+     MARK, [], "no_signal", "no_signal", "verify")
+
 fails = 0
 for name, status, tail, marker, expect, ws, wr, wi in cases:
     r = _core.analyze(status, tail, marker, expect, "cdx-test", "codex.py")
@@ -147,6 +158,16 @@ assert _core._marker_on_own_line(MARK, plan_doc) is False, "documented plan mark
 real_done = f"• Created /tmp/x.html.\n  Verified: 63 lines, inline CSS only.\n{MARK}\n{STATUSBAR}"
 assert _core._marker_on_own_line(MARK, real_done) is True, "a genuinely printed marker should count"
 print("ok   marker_doc_vs_printed: plan-documented marker rejected, printed marker accepted")
+
+# Content retention (live finding): tool gutters ("│ …") / elisions ("… +N lines")
+# are stripped, and a detailed report is NOT truncated away (keep is generous).
+longrep = ("• Ran python3 - <<'PY'\n  │ import inspect\n  │ … +22 lines\n  └ ok\n"
+           "• Created /tmp/x.py. Detailed report:\n"
+           + "\n".join(f"- function f{i}: returns {i}" for i in range(15)) + f"\n{STATUSBAR}")
+ct = _core.analyze("done", longrep, MARK, [], "x", "codex.py")["transcript_tail"]
+assert "import inspect" not in ct and "+22 lines" not in ct, "tool gutter/elision leaked into tail"
+assert "function f0" in ct and "function f14" in ct, "detailed report was truncated — lost content"
+print("ok   content_kept: gutters/elisions stripped, full report retained")
 
 os.unlink(existing.name)
 print(f"\n{'ALL PASS' if fails == 0 else str(fails)+' FAILED'} ({len(cases)} cases)")
