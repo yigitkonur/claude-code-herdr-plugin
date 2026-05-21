@@ -54,6 +54,8 @@ SOCKET_PATH = _default_socket()
 STATE_DIR = os.path.expanduser("~/.cache/skill-herdr/sessions")
 SETTLED = {"idle", "done", "blocked"}
 TAIL_LINES = 60                # read enough to capture a plan block + menu
+TAIL_CHARS = 2000              # hard char cap on transcript_tail (a flood of long
+                               # lines can blow the line budget's byte size)
 SETTLE_DELAY = 0.8             # status event can beat the screen paint
 RECHECK_TRIES = 5              # re-read while a long plan/menu finishes painting
 RECHECK_DELAY = 1.0
@@ -637,7 +639,19 @@ def _clean_tail(tail, keep=28, marker=None):
         if ln.lstrip()[:1] == "•":
             last_bullet = i
     block = lines[last_bullet:] if last_bullet is not None else lines
-    return "\n".join(block[-keep:])
+    block = block[-keep:]
+    # Also bound by characters: a task that floods many long lines (or a no-bullet
+    # raw-output turn) can stay under the line cap yet still be multi-KB. Keep whole
+    # trailing lines within TAIL_CHARS so the envelope can't bloat.
+    if sum(len(ln) + 1 for ln in block) > TAIL_CHARS:
+        trimmed, total = [], 0
+        for ln in reversed(block):
+            total += len(ln) + 1
+            if total > TAIL_CHARS and trimmed:
+                break
+            trimmed.append(ln)
+        block = list(reversed(trimmed))
+    return "\n".join(block)
 
 
 def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="codex.py"):

@@ -169,6 +169,13 @@ assert "import inspect" not in ct and "+22 lines" not in ct, "tool gutter/elisio
 assert "function f0" in ct and "function f14" in ct, "detailed report was truncated — lost content"
 print("ok   content_kept: gutters/elisions stripped, full report retained")
 
+# Flood guard (edge-hunt finding): a task that floods many long lines stays under
+# the LINE cap yet could be multi-KB — transcript_tail must also be char-bounded.
+flood = "\n".join(f"LINE-{i}: the quick brown fox jumps over the lazy dog." for i in range(200)) + f"\n{STATUSBAR}"
+fct = _core.analyze("done", flood, MARK, [], "x", "codex.py")["transcript_tail"]
+assert len(fct) <= _core.TAIL_CHARS + 120, f"transcript_tail not char-bounded: {len(fct)} chars"
+print(f"ok   flood_bounded: transcript_tail = {len(fct)} chars (<= {_core.TAIL_CHARS} cap)")
+
 os.unlink(existing.name)
 print(f"\n{'ALL PASS' if fails == 0 else str(fails)+' FAILED'} ({len(cases)} cases)")
 sys.exit(1 if fails else 0)
