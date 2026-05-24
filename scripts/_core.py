@@ -344,6 +344,10 @@ def _pane_id_for_terminal(terminal_id, socket_path=SOCKET_PATH):
     return None
 
 
+def pane_id_for_terminal(terminal_id, socket_path=SOCKET_PATH):
+    return _pane_id_for_terminal(terminal_id, socket_path)
+
+
 def _caller_workspace_id(socket_path=SOCKET_PATH):
     """Workspace of the calling herdr pane (where Claude Code runs), via HERDR_PANE_ID.
     spawn_codex pins the new tab here so Codex lands in the SAME workspace as its

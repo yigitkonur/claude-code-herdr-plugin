@@ -37,7 +37,8 @@ Resolve from the running HERDR pane:
 2. `pane.get` gives `workspace_id` and `tab_id`.
 3. `workspace.get` gives the caller workspace label.
 4. `tab.get` gives the caller tab label.
-5. Sanitize labels to lowercase `[a-z0-9-]`; use the id only when the label is missing or empty.
+5. If the workspace label is `~`, use the caller tab name for the space segment.
+6. Sanitize labels to lowercase `[a-z0-9-]`; use the id only when the label is missing or empty.
 
 ## Collision Suffix
 

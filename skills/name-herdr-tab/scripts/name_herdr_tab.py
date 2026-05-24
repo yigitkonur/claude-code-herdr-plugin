@@ -29,7 +29,10 @@ def validate_slug(slug):
 
 
 def safe_name(value, fallback):
-    raw = (value or fallback or "").strip().lower()
+    raw_value = (value or fallback or "").strip()
+    if raw_value == "~":
+        raw_value = os.path.basename(os.path.expanduser("~"))
+    raw = raw_value.lower()
     safe = SAFE_CHARS_RE.sub("-", raw).strip("-")
     safe = re.sub(r"-{2,}", "-", safe)
     return safe or SAFE_CHARS_RE.sub("-", fallback.lower()).strip("-") or "unknown"
@@ -69,12 +72,15 @@ def caller_context(request, env=None):
     tab_id = pane["tab_id"]
     workspace = request("workspace.get", {"workspace_id": workspace_id})["workspace"]
     tab = request("tab.get", {"tab_id": tab_id})["tab"]
+    tab_name = safe_name(tab.get("label"), tab_id)
+    space_label = workspace.get("label") or workspace_id
+    space_name = tab_name if space_label == "~" else safe_name(space_label, workspace_id)
     return {
         "workspace_id": workspace_id,
         "tab_id": tab_id,
-        "space_name": safe_name(workspace.get("label"), workspace_id),
-        "tab_name": safe_name(tab.get("label"), tab_id),
-        "space_label": workspace.get("label") or workspace_id,
+        "space_name": space_name,
+        "tab_name": tab_name,
+        "space_label": space_label,
         "tab_label": tab.get("label") or tab_id,
     }
 

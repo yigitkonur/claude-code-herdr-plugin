@@ -258,22 +258,22 @@ def naming_request(method, params):
         assert params == {"pane_id": "p_5"}
         return {"pane": {"workspace_id": "w1", "tab_id": "w1:2"}}
     if method == "workspace.get":
-        return {"workspace": {"workspace_id": "w1", "label": "Client Space!"}}
+        return {"workspace": {"workspace_id": "w1", "label": "~"}}
     if method == "tab.get":
         return {"tab": {"tab_id": "w1:2", "label": "Review PR"}}
     if method == "tab.list":
         return {"tabs": [
-            {"label": "client-space-review-pr-fix-spawn-race"},
-            {"label": "client-space-review-pr-fix-spawn-race-2"},
+            {"label": "review-pr-review-pr-fix-spawn-race"},
+            {"label": "review-pr-review-pr-fix-spawn-race-2"},
         ]}
     raise AssertionError(f"unexpected naming method {method}")
 
 label_info = name_herdr_tab.build_label(
     naming_request, "fix-spawn-race", env={"HERDR_PANE_ID": "p_5"})
-assert label_info["space_name"] == "client-space"
+assert label_info["space_name"] == "review-pr"
 assert label_info["tab_name"] == "review-pr"
-assert label_info["label"] == "client-space-review-pr-fix-spawn-race-3"
-print("ok   label_assembly: caller labels sanitized and collision suffix applied")
+assert label_info["label"] == "review-pr-review-pr-fix-spawn-race-3"
+print("ok   label_assembly: caller labels sanitized, home workspace mapped, collision suffix applied")
 
 # Regression: isolated start creates a workspace, names the tab, spawns there,
 # then closes the temporary root shell pane created with the workspace.
@@ -332,7 +332,7 @@ try:
 
     os.environ["HERDR_PANE_ID"] = "p_5"
     _core.rpc = fake_rpc
-    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "wiso-3", "terminal_id": "term-cdx"}]
+    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "wiso-1", "terminal_id": "term-cdx"}]
     _core.wait_until_ready = lambda *a, **k: True
     _core.send_task_verified = lambda *a, **k: True
     _core.read_screen = lambda *a, **k: ""
@@ -346,6 +346,7 @@ try:
     _core.save_session = lambda rec: saved.update(rec)
     assert codex.cmd_start(Args) == 0
     assert saved["label"] == "client-space-review-pr-audit-ui"
+    assert saved["pane_id"] == "wiso-1"
     assert saved["isolated_workspace_id"] == "wiso"
     assert ("pane.close", {"pane_id": "wiso-1"}) in calls
     print("ok   isolated_start: workspace created, tab labeled, root shell closed")

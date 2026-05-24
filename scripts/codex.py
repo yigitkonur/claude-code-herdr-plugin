@@ -263,6 +263,9 @@ def cmd_start(args):
     if prepared.get("isolated_root_pane_id"):
         try:
             _core.close_pane(prepared["isolated_root_pane_id"])
+            pane_id = _core.pane_id_for_terminal(info["terminal_id"])
+            if pane_id:
+                info["pane_id"] = pane_id
         except _core.HerdrError:
             pass
     rec = {"session": session_id, "label": label, "terminal_id": info["terminal_id"],
