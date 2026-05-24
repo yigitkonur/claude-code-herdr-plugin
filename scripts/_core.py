@@ -334,7 +334,22 @@ def _pane_id_for_terminal(terminal_id, socket_path=SOCKET_PATH):
     return None
 
 
-def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH):
+def _caller_workspace_id(socket_path=SOCKET_PATH):
+    """Workspace of the calling herdr pane (where Claude Code runs), via HERDR_PANE_ID.
+    spawn_codex pins the new tab here so Codex lands in the SAME workspace as its
+    orchestrator instead of herdr's ambient-focused workspace (which drifts when the
+    human or a prior spawn moved focus). Returns None when not inside herdr or the pane
+    can't be resolved -> caller falls back to the default (focused-workspace) path."""
+    pane_env = os.environ.get("HERDR_PANE_ID")   # short form, e.g. "p_5"; pane.get accepts it
+    if not pane_env:
+        return None
+    g = rpc("pane.get", {"pane_id": pane_env}, socket_path)
+    if "result" in g:
+        return g["result"]["pane"].get("workspace_id")
+    return None
+
+
+def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_id=None):
     """Spawn Codex in a FULL-WIDTH pane of its own and wait until it is genuinely
     input-ready. Returns {pane_id, terminal_id, tab_id, agent, registered}.
 
@@ -343,8 +358,14 @@ def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH):
     its plans and menu options ("Yes, impleme…"), corrupting what we parse. We
     create a tab, start Codex in it, then close the leftover root shell so Codex
     fills the tab (~130 cols verified) — clean plans, clean option labels.
+
+    The tab is pinned to the caller's workspace (_caller_workspace_id) so Codex
+    lands in the orchestrator's space, not herdr's ambient-focused one.
     """
-    tc = rpc("tab.create", {}, socket_path)
+    if workspace_id is None:
+        workspace_id = _caller_workspace_id(socket_path)
+    tab_params = {"workspace_id": workspace_id} if workspace_id else {}
+    tc = rpc("tab.create", tab_params, socket_path)
     if "error" in tc:
         raise HerdrError("SPAWN_FAILED", f"tab.create failed: {tc['error']}")
     tab_id = tc["result"]["tab"]["tab_id"]
@@ -352,6 +373,8 @@ def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH):
     rpc("tab.focus", {"tab_id": tab_id}, socket_path)
 
     params = {"name": label, "focus": True, "argv": argv or ["codex"]}
+    if workspace_id:
+        params["workspace_id"] = workspace_id
     if cwd:
         params["cwd"] = cwd
     resp = rpc("agent.start", params, socket_path)
