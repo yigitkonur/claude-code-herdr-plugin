@@ -49,6 +49,7 @@ EXIT CODES
   5  internal error
 """
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -60,6 +61,14 @@ import _core  # noqa: E402
 
 SELF = os.path.abspath(__file__)
 SCHEMA = "v1"
+LOCK_PATH = os.path.join(_core.STATE_DIR, "codex.py.lock")
+
+
+def _with_process_lock(fn):
+    os.makedirs(_core.STATE_DIR, exist_ok=True)
+    with open(LOCK_PATH, "w") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        return fn()
 
 
 # ---------------------------------------------------------------------------
@@ -362,7 +371,7 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     try:
-        return args.fn(args)
+        return _with_process_lock(lambda: args.fn(args))
     except _core.HerdrError as e:
         klass = "environment" if e.code == "HERDR_DOWN" else "internal"
         ec = 3 if e.code == "HERDR_DOWN" else 5
