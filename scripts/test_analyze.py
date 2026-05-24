@@ -176,6 +176,68 @@ fct = _core.analyze("done", flood, MARK, [], "x", "codex.py")["transcript_tail"]
 assert len(fct) <= _core.TAIL_CHARS + 120, f"transcript_tail not char-bounded: {len(fct)} chars"
 print(f"ok   flood_bounded: transcript_tail = {len(fct)} chars (<= {_core.TAIL_CHARS} cap)")
 
+# Regression: start should create and address a background tab without focusing
+# it. Focusing here steals the human's active tab as soon as a helper starts.
+calls = []
+orig_rpc = _core.rpc
+orig_list_panes = _core.list_panes
+orig_wait_until_ready = _core.wait_until_ready
+orig_sleep = _core.time.sleep
+try:
+    def fake_rpc(method, params, socket_path=_core.SOCKET_PATH, timeout=10):
+        calls.append((method, params))
+        if method == "tab.create":
+            return {"result": {"tab": {"tab_id": "1:2"}, "root_pane": {"pane_id": "1-2"}}}
+        if method == "agent.start":
+            return {"result": {"agent": {"pane_id": "1-3", "terminal_id": "term-cdx", "agent": "codex"}}}
+        if method == "pane.close":
+            return {"result": {}}
+        if method == "pane.get":
+            return {"result": {"pane": {"agent": "codex"}}}
+        raise AssertionError(f"unexpected rpc: {method}")
+    _core.rpc = fake_rpc
+    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "1-3", "terminal_id": "term-cdx"}]
+    _core.wait_until_ready = lambda *a, **k: True
+    _core.time.sleep = lambda _seconds: None
+    info = _core.spawn_codex("cdx-test", workspace_id="1")
+    assert info["pane_id"] == "1-3"
+    assert ("tab.focus", {"tab_id": "1:2"}) not in calls, "spawn should not focus the helper tab"
+    assert calls[0] == ("tab.create", {"focus": False, "workspace_id": "1"})
+    assert calls[1][0] == "agent.start", calls[1]
+    assert calls[1][1]["tab_id"] == "1:2" and calls[1][1]["focus"] is False
+    print("ok   spawn_background: tab and agent start stay unfocused")
+finally:
+    _core.rpc = orig_rpc
+    _core.list_panes = orig_list_panes
+    _core.wait_until_ready = orig_wait_until_ready
+    _core.time.sleep = orig_sleep
+
+# Regression: verified send must never append a long task repeatedly just
+# because composer detection cannot prove where the wrapped input landed.
+orig_status = _core.current_status
+orig_read_screen = _core.read_screen
+orig_send_text_enter = _core.send_text_enter
+orig_send_keys = _core.send_keys
+orig_sleep = _core.time.sleep
+try:
+    sent = []
+    keyed = []
+    _core.current_status = lambda *a, **k: "idle"
+    _core.read_screen = lambda *a, **k: f"› Find and fix a bug\n{STATUSBAR}"
+    _core.send_text_enter = lambda pane_id, text, socket_path=_core.SOCKET_PATH: sent.append(text)
+    _core.send_keys = lambda pane_id, keys, socket_path=_core.SOCKET_PATH: keyed.append(keys)
+    _core.time.sleep = lambda _seconds: None
+    assert _core.send_task_verified("1-3", "Do the important task", tries=4) is True
+    assert sent == ["Do the important task"], f"task text was sent {len(sent)} times"
+    assert keyed == [], "placeholder-only composer should not receive Enter before the task"
+    print("ok   send_once: task text is written at most once")
+finally:
+    _core.current_status = orig_status
+    _core.read_screen = orig_read_screen
+    _core.send_text_enter = orig_send_text_enter
+    _core.send_keys = orig_send_keys
+    _core.time.sleep = orig_sleep
+
 os.unlink(existing.name)
 print(f"\n{'ALL PASS' if fails == 0 else str(fails)+' FAILED'} ({len(cases)} cases)")
 sys.exit(1 if fails else 0)

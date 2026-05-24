@@ -299,6 +299,12 @@ def composer_holds(tail, text):
     return chunk[:16] in comp
 
 
+def composer_has_text(tail):
+    """True when the composer contains real user text, not Codex's placeholder."""
+    comp = " ".join(composer_text(tail).split())
+    return bool(comp and not _PLACEHOLDER_HINTS.search(comp))
+
+
 def wait_until_ready(pane_id, timeout=REGISTER_TIMEOUT, socket_path=SOCKET_PATH):
     """Block until Codex is genuinely input-ready: settled status AND the status
     bar is painted AND MCP startup churn has cleared, stable across two reads.
@@ -356,23 +362,26 @@ def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_i
     Why a dedicated tab: agent.start splits the focused tab, and a narrow split
     (~28 cols when several panes share a tab) makes Codex hard-wrap and ellipsize
     its plans and menu options ("Yes, impleme…"), corrupting what we parse. We
-    create a tab, start Codex in it, then close the leftover root shell so Codex
-    fills the tab (~130 cols verified) — clean plans, clean option labels.
+    create an unfocused tab, start Codex in it, then close the leftover root
+    shell so Codex fills the tab (~130 cols verified) — clean plans, clean
+    option labels.
 
     The tab is pinned to the caller's workspace (_caller_workspace_id) so Codex
-    lands in the orchestrator's space, not herdr's ambient-focused one.
+    lands in the orchestrator's space, not herdr's ambient-focused one. It must
+    remain unfocused: this is a background helper, not a human attention switch.
     """
     if workspace_id is None:
         workspace_id = _caller_workspace_id(socket_path)
-    tab_params = {"workspace_id": workspace_id} if workspace_id else {}
+    tab_params = {"focus": False}
+    if workspace_id:
+        tab_params["workspace_id"] = workspace_id
     tc = rpc("tab.create", tab_params, socket_path)
     if "error" in tc:
         raise HerdrError("SPAWN_FAILED", f"tab.create failed: {tc['error']}")
     tab_id = tc["result"]["tab"]["tab_id"]
     root_pane = tc["result"]["root_pane"]["pane_id"]
-    rpc("tab.focus", {"tab_id": tab_id}, socket_path)
 
-    params = {"name": label, "focus": True, "argv": argv or ["codex"]}
+    params = {"name": label, "tab_id": tab_id, "focus": False, "argv": argv or ["codex"]}
     if workspace_id:
         params["workspace_id"] = workspace_id
     if cwd:
@@ -407,36 +416,40 @@ def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_i
 
 def send_task_verified(pane_id, text, socket_path=SOCKET_PATH, tries=4):
     """Submit `text` to the composer and CONFIRM it actually went through, rather
-    than trusting a single fire-and-forget send. Two phases per attempt:
-
-      A. Ensure the text is in the composer (type it if it isn't).
-      B. Press Enter, then verify submission: Codex went `working`, OR the
-         composer no longer holds our text (it cleared / scrolled into history).
-
-    Retries the whole cycle if a send was eaten during init churn or an embedded
-    newline left the input multi-line and unsent. Returns True if it landed.
+    than trusting a single fire-and-forget send. The task text is written at
+    most once, using the atomic text+Enter RPC. If text is still sitting in the
+    composer, retries press Enter only; they never append the full task again.
+    This avoids duplicating a long prompt when screen-based composer detection
+    misses a wrapped or partially visible input.
 
     `text` MUST be a single line (callers join multi-line prompts with spaces) —
     an embedded newline can submit the first line early and strand the rest.
     """
+    sent_text = False
     for _ in range(tries):
-        tail = read_screen(pane_id, 24, socket_path)
-        if not composer_holds(tail, text):
-            send_text(pane_id, text, socket_path)   # type only; no submit yet
-            time.sleep(0.7)
-            tail = read_screen(pane_id, 24, socket_path)
-        if composer_holds(tail, text):
+        if current_status(pane_id, socket_path) == "working":
+            return True
+        tail = read_screen(pane_id, 80, socket_path)
+        if composer_has_text(tail):
             send_keys(pane_id, ["Enter"], socket_path)
             time.sleep(1.1)
             if current_status(pane_id, socket_path) == "working":
                 return True
-            if not composer_holds(read_screen(pane_id, 24, socket_path), text):
+            if not composer_has_text(read_screen(pane_id, 80, socket_path)):
+                return True
+        elif not sent_text:
+            send_text_enter(pane_id, text, socket_path)
+            sent_text = True
+            time.sleep(1.1)
+            if current_status(pane_id, socket_path) == "working":
+                return True
+            if not composer_has_text(read_screen(pane_id, 80, socket_path)):
                 return True
         time.sleep(0.8)
     # Final adjudication.
     if current_status(pane_id, socket_path) == "working":
         return True
-    return not composer_holds(read_screen(pane_id, 24, socket_path), text)
+    return sent_text and not composer_has_text(read_screen(pane_id, 80, socket_path))
 
 
 def await_started(pane_id, timeout=10, socket_path=SOCKET_PATH):
