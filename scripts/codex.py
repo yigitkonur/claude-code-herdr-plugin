@@ -175,6 +175,34 @@ def _usage_error(command, code, message, suggestion):
     return _fail(command, "usage", code, message, False, suggestion, exit_code=2)
 
 
+def _resolve_worktree(args, slug):
+    """Materialize a worktree if --worktree was requested. Returns (info, error)
+    where info is None if no --worktree, or {repo, branch, path, caller_branch,
+    keep_worktree}. Errors are usage errors (no git repo / spawn-time failure)."""
+    want = bool(getattr(args, "worktree", False)) or _env_truthy("CODEX_WORKTREE")
+    keep_wt = bool(getattr(args, "keep_worktree", False)) or _env_truthy("CODEX_KEEP_WORKTREE")
+    if not want:
+        return None, 0
+    repo = _core.repo_root(args.cwd or os.getcwd())
+    if not repo:
+        return None, _usage_error("start", "NO_REPO",
+                                  "--worktree requires being inside a git repository.",
+                                  "Run inside a checkout, or pass --cwd to a path inside one.")
+    caller_branch = _core.current_branch(repo)
+    branch = _core.unique_branch(repo, f"codex/{slug}")
+    # Path mirrors the unique branch name so worktree dirs don't collide either.
+    safe = branch.replace("/", "-")
+    path = os.path.join(repo, ".worktrees", safe)
+    try:
+        wt_path = _core.worktree_create(repo, branch, path, base="HEAD")
+    except _core.HerdrError as e:
+        return None, _fail("start", "environment", e.code, e.message, True,
+                           "Inspect repo state with `git worktree list`, then retry.",
+                           exit_code=3)
+    return {"repo": repo, "branch": branch, "path": wt_path,
+            "caller_branch": caller_branch, "keep": keep_wt}, 0
+
+
 def _resolve_spawn_plan(args):
     """Validate flags and build a structured per-mode spawn plan. Returns
     (plan_dict, 0) or (None, exit_code). Plan keys:
@@ -182,11 +210,13 @@ def _resolve_spawn_plan(args):
       slug      -- validated slug
       label     -- final user-facing label (pane label for pane mode, tab label
                    for tab/space modes)
-      cwd       -- working directory for the spawned pane
+      cwd       -- working directory for the spawned pane (overridden by
+                   worktree path when --worktree is set)
       keep      -- True to skip resource teardown on `end`
       pane      -- pane-mode extras: {caller_tab_id}
       tab       -- tab-mode extras:  {workspace_id}
       space     -- space-mode extras: {workspace_label, inner_label}
+      worktree  -- None, or {repo, branch, path, caller_branch, keep}
     """
     mode = (args.mode or os.environ.get("CODEX_IN") or "pane").strip().lower()
     if mode not in name_herdr_tab.MODES:
@@ -199,13 +229,22 @@ def _resolve_spawn_plan(args):
     except name_herdr_tab.NamingError as e:
         return None, _usage_error("start", "BAD_SLUG", str(e),
                                   "Use 1-3 lowercase words with [a-z0-9-], e.g. fix-spawn-race.")
+    worktree, code = _resolve_worktree(args, args.slug)
+    if code:
+        return None, code
     try:
         info = name_herdr_tab.build_label(_request, args.slug, mode=mode)
     except (KeyError, name_herdr_tab.NamingError, _core.HerdrError) as e:
+        # Naming failure happens after worktree materialization; roll the
+        # worktree back so we don't leak it on a non-spawn error.
+        if worktree:
+            _core.worktree_remove(worktree["repo"], worktree["path"],
+                                  branch=worktree["branch"])
         return None, _fail("start", "environment", "NAMING_FAILED", str(e), True,
                            "Check HERDR_PANE_ID and `herdr status`, then retry.", exit_code=3)
+    cwd = worktree["path"] if worktree else args.cwd
     plan = {"mode": mode, "slug": args.slug, "label": info["label"],
-            "cwd": args.cwd, "keep": keep}
+            "cwd": cwd, "keep": keep, "worktree": worktree}
     if mode == "pane":
         plan["pane"] = {"caller_tab_id": info["target_tab_id"]}
     elif mode == "tab":
@@ -240,7 +279,16 @@ def cmd_start(args):
         return code
     label = plan["label"]
     session_id = "cdx-" + uuid.uuid4().hex[:4]
-    info = _spawn_for_mode(plan)
+    try:
+        info = _spawn_for_mode(plan)
+    except _core.HerdrError:
+        # Spawn failure leaves no herdr resources for pane/tab modes (the helpers
+        # roll back internally) but the worktree may have been materialized
+        # already — release it so we don't leak it on a failed start.
+        wt = plan.get("worktree")
+        if wt:
+            _core.worktree_remove(wt["repo"], wt["path"], branch=wt["branch"])
+        raise
     rec = {"session": session_id, "label": label, "terminal_id": info["terminal_id"],
            "pane_id": info["pane_id"], "tab_id": info.get("tab_id"), "agent": info["agent"],
            "marker": marker, "plan_mode": bool(args.plan), "created": time.time(),
@@ -250,7 +298,9 @@ def cmd_start(args):
                             else (plan.get("tab", {}).get("workspace_id")
                                   if plan["mode"] == "tab" else None),
            "caller_tab_id": plan.get("pane", {}).get("caller_tab_id")
-                            if plan["mode"] == "pane" else None}
+                            if plan["mode"] == "pane" else None,
+           "worktree": plan.get("worktree"),
+           "keep_worktree": bool(plan.get("worktree") and plan["worktree"].get("keep"))}
     _core.save_session(rec)
     pane_id = info["pane_id"]
 
@@ -397,15 +447,48 @@ def cmd_end(args):
                 workspace_state = "closed"
             except _core.HerdrError:
                 workspace_state = "close_attempted"
+    wt = rec.get("worktree")
+    keep_wt = bool(rec.get("keep_worktree"))
+    worktree_summary = None
+    if wt:
+        if keep_wt:
+            worktree_summary = {"kept": True, "branch": wt["branch"], "path": wt["path"],
+                                "reason": "keep_worktree"}
+        else:
+            status = _core.worktree_status(wt["repo"], wt["path"], wt.get("caller_branch", ""))
+            # ahead == -1 means we couldn't determine (e.g. caller branch missing)
+            # -- treat as unmerged and keep, so we never delete work we can't reason about.
+            clean_and_merged = (status["ahead"] == 0 and not status["dirty"])
+            if clean_and_merged:
+                outcome = _core.worktree_remove(wt["repo"], wt["path"], branch=wt["branch"])
+                worktree_summary = {"kept": False, "branch": wt["branch"], "path": wt["path"],
+                                    "removed": outcome["removed"],
+                                    "branch_deleted": outcome["branch_deleted"],
+                                    "errors": outcome["errors"]}
+            else:
+                reason = "dirty_tree" if status["dirty"] else "unmerged_commits"
+                if status["ahead"] == -1:
+                    reason = "unknown_state"
+                worktree_summary = {"kept": True, "branch": wt["branch"], "path": wt["path"],
+                                    "ahead": status["ahead"], "dirty": status["dirty"],
+                                    "reason": reason}
     _core.delete_session(args.session)
     summary = f"Session ended ({mode}); pane {pane_state}"
     if workspace_state:
         summary += f", workspace {workspace_state}"
+    if worktree_summary:
+        if worktree_summary.get("kept"):
+            summary += f", worktree kept ({worktree_summary.get('reason')})"
+        elif worktree_summary.get("removed"):
+            summary += ", worktree removed"
+        else:
+            summary += ", worktree removal attempted"
     summary += ", state deleted."
     _emit("end", ok=True, session=args.session, result={
         "state": "ended", "reason": "cleaned_up", "summary": summary,
         "plan": None, "questions": [], "options": [], "marker_found": False, "artifacts": [],
-        "transcript_tail": "", "next_action": {"intent": "nothing", "command": None, "why": ""}})
+        "transcript_tail": "", "next_action": {"intent": "nothing", "command": None, "why": ""},
+        "worktree": worktree_summary})
     return 0
 
 
@@ -452,6 +535,12 @@ def build_parser():
     s.add_argument("--keep", action="store_true",
                    help="Skip resource teardown on `end` (keep pane/tab/workspace). "
                         "Also CODEX_KEEP=1.")
+    s.add_argument("--worktree", action="store_true",
+                   help="Materialize a git worktree on codex/<slug> from HEAD and use it as cwd. "
+                        "Requires a git repo. Also CODEX_WORKTREE=1.")
+    s.add_argument("--keep-worktree", action="store_true",
+                   help="Never auto-remove the worktree on `end` (overrides the merge check). "
+                        "Also CODEX_KEEP_WORKTREE=1.")
     s.add_argument("--plan", action="store_true", help="Enter plan mode (/plan) before the task.")
     s.add_argument("--cwd", default=None, help="Working directory for the pane.")
     s.add_argument("--marker", default=None, help="Completion marker (auto-generated if omitted).")
