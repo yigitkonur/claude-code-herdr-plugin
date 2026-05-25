@@ -1,6 +1,6 @@
 # claude-code-herdr-plugin
 
-> Unofficial · v1.0.0 · MIT · Not affiliated with the herdr project or Anthropic.
+> Unofficial · v1.1.0 · MIT · Not affiliated with the herdr project or Anthropic.
 
 **Drive a Codex sub-agent from Claude Code through a herdr pane, and get back one JSON verdict per turn — no screen-scraping, no status polling.**
 
@@ -189,7 +189,7 @@ Then run the two `/plugin` commands above. The Python tool, session-state locati
 
 ```
 .claude-plugin/
-  plugin.json                # v1.0.0 plugin manifest
+  plugin.json                # v1.1.0 plugin manifest
   marketplace.json           # single-plugin marketplace pointing at ./
 skills/
   claude-to-codex/           # the only skill — drives Codex from Claude Code
