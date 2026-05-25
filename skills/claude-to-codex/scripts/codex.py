@@ -60,7 +60,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _core  # noqa: E402
 
 SKILL_HELPER = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "..", "skills", "name-herdr-tab", "scripts"))
+    os.path.join(os.path.dirname(__file__), "..", "..", "name-herdr-tab", "scripts"))
 if os.path.isdir(SKILL_HELPER):
     sys.path.insert(0, SKILL_HELPER)
 import name_herdr_tab  # noqa: E402

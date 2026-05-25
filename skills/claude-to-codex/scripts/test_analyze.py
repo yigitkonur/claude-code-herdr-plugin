@@ -4,7 +4,7 @@ No spawning — feeds crafted screen tails and asserts (state, reason, next.inte
 Run: python3 scripts/test_analyze.py   (exit 0 = all pass)."""
 import json, sys, os, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills", "name-herdr-tab", "scripts")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "name-herdr-tab", "scripts")))
 import _core
 import codex
 import name_herdr_tab

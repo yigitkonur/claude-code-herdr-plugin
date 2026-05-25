@@ -1,6 +1,6 @@
 ---
-name: skill-herdr
-description: herdr sub-agent orchestration. ALWAYS invoke when delegating to a Codex sub-agent ("have codex do X", "run this in the background", "start this task", "send this payload", "continue this session") or to Pi/Claude/OpenCode/Hermes, running agents in parallel, spawning a side pane, waiting for an agent to finish, reading another agent's output, approving its prompts, or when the user mentions herdr (pane, agent, send, wait, run, split) or HERDR_PANE_ID is set. For Codex, drive everything through ONE tool — scripts/codex.py (start/send/reply/await/status/end/sessions) — run it in the background, read its single JSON verdict, do result.next_action. Python encodes the spawn-readiness race, verified send, full-width capture, marker+verification completion, never-truncated plans, session continuity across pane-slot shifts, structured pause reasons (question vs plan-menu vs blocked widget), and cleanup. References cover the herdr substrate (namespaces, parallel fleets, raw IPC, traps) beyond a single Codex.
+name: claude-to-codex
+description: Drive a Codex sub-agent from Claude Code over a herdr pane. ALWAYS invoke when delegating to a Codex sub-agent ("have codex do X", "run this in the background", "start this task", "send this payload", "continue this session") or to Pi/Claude/OpenCode/Hermes, running agents in parallel, spawning a side pane, waiting for an agent to finish, reading another agent's output, approving its prompts, or when the user mentions herdr (pane, agent, send, wait, run, split) or HERDR_PANE_ID is set. For Codex, drive everything through ONE tool — scripts/codex.py (start/send/reply/await/status/end/sessions) — run it in the background, read its single JSON verdict, do result.next_action. Python encodes the spawn-readiness race, verified send, full-width capture, marker+verification completion, never-truncated plans, session continuity across pane-slot shifts, structured pause reasons (question vs plan-menu vs blocked widget), and cleanup. References cover the herdr substrate (namespaces, parallel fleets, raw IPC, traps) beyond a single Codex.
 ---
 
 # herdr — drive a Codex sub-agent from Claude Code
@@ -25,7 +25,7 @@ The user delegates to Codex or another agent (*"have codex do X"*, *"let pi hand
 
 ## The one tool — `codex.py`
 
-`SKILL_DIR` = this skill's dir (e.g. `~/.claude/skills/skill-herdr`); use the absolute path if a relative one doesn't resolve.
+`SKILL_DIR` = `${CLAUDE_PLUGIN_ROOT}/skills/claude-to-codex` (the plugin sets `CLAUDE_PLUGIN_ROOT` when running). Use the absolute path if the expansion doesn't resolve in your shell.
 
 | Verb | Does |
 |---|---|
