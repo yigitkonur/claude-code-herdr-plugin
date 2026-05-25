@@ -2,7 +2,7 @@
 """Deterministic unit test of _core.analyze across every state branch.
 No spawning — feeds crafted screen tails and asserts (state, reason, next.intent).
 Run: python3 scripts/test_analyze.py   (exit 0 = all pass)."""
-import sys, os, tempfile
+import json, sys, os, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills", "name-herdr-tab", "scripts")))
 import _core
@@ -358,6 +358,381 @@ finally:
     _core.settle_and_analyze = orig_settle
     _core.time.sleep = orig_sleep
     _core.save_session = orig_save_session
+
+# Regression: --in pane spawns via agent.start --split right + pane.rename,
+# with NO tab.create and NO workspace.create. Caller's tab/workspace untouched.
+orig_rpc = _core.rpc
+orig_list_panes = _core.list_panes
+orig_wait_until_ready = _core.wait_until_ready
+orig_send_task_verified = _core.send_task_verified
+orig_read_screen = _core.read_screen
+orig_settle = _core.settle_and_analyze
+orig_sleep = _core.time.sleep
+orig_save_session = _core.save_session
+saved = {}
+calls = []
+try:
+    def fake_rpc(method, params, socket_path=_core.SOCKET_PATH, timeout=10):
+        calls.append((method, params))
+        if method == "pane.get":
+            if params["pane_id"] == "p_5":
+                return {"result": {"pane": {"workspace_id": "w1", "tab_id": "w1:2"}}}
+            return {"result": {"pane": {"agent": "codex"}}}
+        if method == "workspace.get":
+            return {"result": {"workspace": {"workspace_id": "w1", "label": "Client Space"}}}
+        if method == "tab.get":
+            return {"result": {"tab": {"tab_id": "w1:2", "label": "Review PR"}}}
+        if method == "pane.list":
+            return {"result": {"panes": [{"pane_id": "w1-3", "tab_id": "w1:2", "label": None}]}}
+        if method == "agent.start":
+            assert params["split"] == "right" and params["focus"] is False
+            assert params["tab_id"] == "w1:2" and params["name"] == "quick-side"
+            return {"result": {"agent": {"pane_id": "w1-4", "terminal_id": "term-pane",
+                                         "agent": "codex"}}}
+        if method == "pane.rename":
+            assert params == {"pane_id": "w1-4", "label": "quick-side"}
+            return {"result": {}}
+        raise AssertionError(f"unexpected rpc: {method} {params}")
+
+    class Args:
+        task = "do work"
+        plan = False
+        cwd = None
+        slug = "quick-side"
+        mode = "pane"
+        keep = False
+        marker = "CDX_DONE_TEST"
+        no_wait = False
+        expect = []
+        timeout = 1
+
+    os.environ["HERDR_PANE_ID"] = "p_5"
+    _core.rpc = fake_rpc
+    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "w1-4", "terminal_id": "term-pane"}]
+    _core.wait_until_ready = lambda *a, **k: True
+    _core.send_task_verified = lambda *a, **k: True
+    _core.read_screen = lambda *a, **k: ""
+    _core.settle_and_analyze = lambda *a, **k: ({"state": "completed", "reason": "marker_verified",
+                                                "summary": "", "plan": None, "questions": [],
+                                                "options": [], "marker_found": True,
+                                                "artifacts": [], "transcript_tail": "",
+                                                "next_action": {"intent": "nothing",
+                                                                "command": None, "why": ""}}, False)
+    _core.time.sleep = lambda _seconds: None
+    _core.save_session = lambda rec: saved.update(rec)
+    assert codex.cmd_start(Args) == 0
+    methods = [m for m, _ in calls]
+    assert "tab.create" not in methods, "pane mode must NOT create a tab"
+    assert "workspace.create" not in methods, "pane mode must NOT create a workspace"
+    assert "pane.rename" in methods, "pane mode must apply a sidebar label via pane.rename"
+    assert saved["mode"] == "pane" and saved["label"] == "quick-side"
+    assert saved["caller_tab_id"] == "w1:2"
+    assert saved["workspace_id"] is None
+    print("ok   pane_start: agent.start --split right + pane.rename, no tab/workspace create")
+finally:
+    os.environ.pop("HERDR_PANE_ID", None)
+    _core.rpc = orig_rpc
+    _core.list_panes = orig_list_panes
+    _core.wait_until_ready = orig_wait_until_ready
+    _core.send_task_verified = orig_send_task_verified
+    _core.read_screen = orig_read_screen
+    _core.settle_and_analyze = orig_settle
+    _core.time.sleep = orig_sleep
+    _core.save_session = orig_save_session
+
+# Regression: --in tab uses the composed label and the caller's workspace, no
+# workspace.create. The full-width-tab spawn flow (tab.create + agent.start +
+# close root pane) is shared with space mode and exercised by space_start above.
+orig_rpc = _core.rpc
+orig_list_panes = _core.list_panes
+orig_wait_until_ready = _core.wait_until_ready
+orig_send_task_verified = _core.send_task_verified
+orig_read_screen = _core.read_screen
+orig_settle = _core.settle_and_analyze
+orig_sleep = _core.time.sleep
+orig_save_session = _core.save_session
+saved = {}
+calls = []
+try:
+    def fake_rpc(method, params, socket_path=_core.SOCKET_PATH, timeout=10):
+        calls.append((method, params))
+        if method == "pane.get":
+            if params["pane_id"] == "p_5":
+                return {"result": {"pane": {"workspace_id": "w1", "tab_id": "w1:2"}}}
+            return {"result": {"pane": {"agent": "codex"}}}
+        if method == "workspace.get":
+            return {"result": {"workspace": {"workspace_id": "w1", "label": "Client Space"}}}
+        if method == "tab.get":
+            return {"result": {"tab": {"tab_id": "w1:2", "label": "Review PR"}}}
+        if method == "tab.list":
+            assert params == {"workspace_id": "w1"}
+            return {"result": {"tabs": []}}
+        if method == "tab.create":
+            assert params == {"focus": False, "label": "client-space-review-pr-audit-ui",
+                              "workspace_id": "w1"}
+            return {"result": {"tab": {"tab_id": "w1:3"}, "root_pane": {"pane_id": "w1-9"}}}
+        if method == "agent.start":
+            assert params["name"] == "client-space-review-pr-audit-ui"
+            assert params["workspace_id"] == "w1" and params["tab_id"] == "w1:3"
+            assert params["focus"] is False
+            return {"result": {"agent": {"pane_id": "w1-10", "terminal_id": "term-tab",
+                                         "agent": "codex"}}}
+        if method == "pane.close":
+            return {"result": {}}
+        raise AssertionError(f"unexpected rpc: {method} {params}")
+
+    class Args:
+        task = "do work"
+        plan = False
+        cwd = None
+        slug = "audit-ui"
+        mode = "tab"
+        keep = False
+        marker = "CDX_DONE_TEST"
+        no_wait = False
+        expect = []
+        timeout = 1
+
+    os.environ["HERDR_PANE_ID"] = "p_5"
+    _core.rpc = fake_rpc
+    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "w1-10", "terminal_id": "term-tab"}]
+    _core.wait_until_ready = lambda *a, **k: True
+    _core.send_task_verified = lambda *a, **k: True
+    _core.read_screen = lambda *a, **k: ""
+    _core.settle_and_analyze = lambda *a, **k: ({"state": "completed", "reason": "marker_verified",
+                                                "summary": "", "plan": None, "questions": [],
+                                                "options": [], "marker_found": True,
+                                                "artifacts": [], "transcript_tail": "",
+                                                "next_action": {"intent": "nothing",
+                                                                "command": None, "why": ""}}, False)
+    _core.time.sleep = lambda _seconds: None
+    _core.save_session = lambda rec: saved.update(rec)
+    assert codex.cmd_start(Args) == 0
+    methods = [m for m, _ in calls]
+    assert "workspace.create" not in methods, "tab mode must NOT create a workspace"
+    assert "pane.rename" not in methods, "tab mode labels via tab.create, not pane.rename"
+    assert saved["mode"] == "tab" and saved["label"] == "client-space-review-pr-audit-ui"
+    assert saved["workspace_id"] == "w1"
+    print("ok   tab_start: tab.create in caller workspace with composed label, no workspace.create")
+finally:
+    os.environ.pop("HERDR_PANE_ID", None)
+    _core.rpc = orig_rpc
+    _core.list_panes = orig_list_panes
+    _core.wait_until_ready = orig_wait_until_ready
+    _core.send_task_verified = orig_send_task_verified
+    _core.read_screen = orig_read_screen
+    _core.settle_and_analyze = orig_settle
+    _core.time.sleep = orig_sleep
+    _core.save_session = orig_save_session
+
+# Regression: pane-mode collision suffixing walks against existing pane labels
+# within the target tab (NOT tab labels, NOT all panes).
+def pane_naming_rpc(method, params):
+    if method == "pane.get":
+        assert params == {"pane_id": "p_5"}
+        return {"pane": {"workspace_id": "w1", "tab_id": "w1:2"}}
+    if method == "workspace.get":
+        return {"workspace": {"workspace_id": "w1", "label": "Client Space"}}
+    if method == "tab.get":
+        return {"tab": {"tab_id": "w1:2", "label": "Review PR"}}
+    if method == "pane.list":
+        return {"panes": [
+            {"pane_id": "w1-3", "tab_id": "w1:2", "label": "audit-ui"},
+            {"pane_id": "w1-4", "tab_id": "w1:2", "label": "audit-ui-2"},
+            {"pane_id": "w1-5", "tab_id": "w1:9", "label": "audit-ui-3"},  # different tab
+        ]}
+    raise AssertionError(f"unexpected naming method {method}")
+
+pane_info = name_herdr_tab.build_label(
+    pane_naming_rpc, "audit-ui", mode="pane", env={"HERDR_PANE_ID": "p_5"})
+assert pane_info["label"] == "audit-ui-3", f"pane collision suffix wrong: {pane_info['label']}"
+assert pane_info["target_tab_id"] == "w1:2"
+print("ok   pane_collision_suffix: -3 chosen (peers -2 in same tab; -3 in other tab is OK)")
+
+# Regression: NO spawn path ever changes focus. Any tab.focus / workspace.focus /
+# pane.focus call, OR any params with focus=True, leaks the human's view. Sweep
+# the recorded calls from the per-mode tests (re-run the dispatchers minimally
+# rather than relying on prior test state).
+focus_violations = []
+def focus_audit_rpc(method, params, socket_path=_core.SOCKET_PATH, timeout=10):
+    if method.endswith(".focus") or params.get("focus") is True:
+        focus_violations.append((method, params))
+    if method == "pane.get":
+        if params.get("pane_id") == "p_5":
+            return {"result": {"pane": {"workspace_id": "w1", "tab_id": "w1:2"}}}
+        return {"result": {"pane": {"agent": "codex"}}}
+    if method == "workspace.get":
+        return {"result": {"workspace": {"workspace_id": "w1", "label": "Client Space"}}}
+    if method == "tab.get":
+        return {"result": {"tab": {"tab_id": "w1:2", "label": "Review PR"}}}
+    if method == "pane.list":
+        return {"result": {"panes": []}}
+    if method == "tab.list":
+        return {"result": {"tabs": []}}
+    if method == "tab.create":
+        return {"result": {"tab": {"tab_id": "w1:3"}, "root_pane": {"pane_id": "w1-9"}}}
+    if method == "workspace.create":
+        return {"result": {"workspace": {"workspace_id": "ws-iso"},
+                           "root_pane": {"pane_id": "ws-iso-1"}}}
+    if method == "agent.start":
+        return {"result": {"agent": {"pane_id": "x-99", "terminal_id": "tt", "agent": "codex"}}}
+    if method == "pane.close" or method == "pane.rename":
+        return {"result": {}}
+    raise AssertionError(f"unexpected rpc: {method}")
+
+orig_rpc = _core.rpc
+orig_list_panes = _core.list_panes
+orig_wait_until_ready = _core.wait_until_ready
+orig_send_task_verified = _core.send_task_verified
+orig_read_screen = _core.read_screen
+orig_settle = _core.settle_and_analyze
+orig_sleep = _core.time.sleep
+orig_save_session = _core.save_session
+try:
+    os.environ["HERDR_PANE_ID"] = "p_5"
+    _core.rpc = focus_audit_rpc
+    _core.list_panes = lambda socket_path=_core.SOCKET_PATH: [{"pane_id": "x-99", "terminal_id": "tt"}]
+    _core.wait_until_ready = lambda *a, **k: True
+    _core.send_task_verified = lambda *a, **k: True
+    _core.read_screen = lambda *a, **k: ""
+    _core.settle_and_analyze = lambda *a, **k: ({"state": "completed", "reason": "marker_verified",
+                                                "summary": "", "plan": None, "questions": [],
+                                                "options": [], "marker_found": True,
+                                                "artifacts": [], "transcript_tail": "",
+                                                "next_action": {"intent": "nothing",
+                                                                "command": None, "why": ""}}, False)
+    _core.time.sleep = lambda _seconds: None
+    _core.save_session = lambda rec: None
+    for mode in ("pane", "tab", "space"):
+        class A:
+            task = "do work"; plan = False; cwd = None; slug = "no-focus"; keep = False
+            marker = "M"; no_wait = False; expect = []; timeout = 1
+        A.mode = mode
+        codex.cmd_start(A)
+    assert not focus_violations, f"focus stolen: {focus_violations}"
+    print("ok   no_focus_invariant: pane/tab/space all spawn unfocused (no .focus rpc, no focus=True)")
+finally:
+    os.environ.pop("HERDR_PANE_ID", None)
+    _core.rpc = orig_rpc
+    _core.list_panes = orig_list_panes
+    _core.wait_until_ready = orig_wait_until_ready
+    _core.send_task_verified = orig_send_task_verified
+    _core.read_screen = orig_read_screen
+    _core.settle_and_analyze = orig_settle
+    _core.time.sleep = orig_sleep
+    _core.save_session = orig_save_session
+
+# Regression: worktree round-trip — when the branch is fully merged AND the
+# working tree is clean, `end` removes the worktree and deletes the branch.
+import subprocess, shutil
+def _gx(args, cwd):
+    return subprocess.check_call(["git", "-c", "user.email=t@t", "-c", "user.name=t"] + args,
+                                 cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+repo = tempfile.mkdtemp(prefix="codex-wt-merged-")
+try:
+    _gx(["init", "-q", "-b", "main"], repo)
+    _gx(["commit", "--allow-empty", "-q", "-m", "init"], repo)
+    wt_path = _core.worktree_create(repo, "codex/wt-merged", os.path.join(repo, ".worktrees", "codex-wt-merged"))
+    _gx(["commit", "--allow-empty", "-q", "-m", "feature"], wt_path)
+    _gx(["merge", "--no-ff", "-q", "-m", "merge", "codex/wt-merged"], repo)
+
+    orig_load = _core.load_session
+    orig_resolve = _core.resolve_pane_id
+    orig_release = _core.release_agent
+    orig_close_pane = _core.close_pane
+    orig_delete = _core.delete_session
+    rec = {"session": "cdx-wtm", "terminal_id": "tt", "mode": "tab",
+           "workspace_id": "w1", "keep": False, "keep_worktree": False,
+           "worktree": {"repo": repo, "branch": "codex/wt-merged",
+                        "path": wt_path, "caller_branch": "main", "keep": False}}
+    captured = {}
+    try:
+        _core.load_session = lambda s: rec
+        _core.resolve_pane_id = lambda r: "w1-10"
+        _core.release_agent = lambda p: None
+        _core.close_pane = lambda p: None
+        _core.delete_session = lambda s: None
+        # Capture stdout to read the verdict envelope
+        import io
+        buf = io.StringIO()
+        sys_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            class EndArgs:
+                session = "cdx-wtm"
+            assert codex.cmd_end(EndArgs) == 0
+        finally:
+            sys.stdout = sys_stdout
+        envelope = json.loads(buf.getvalue())
+        wt_summary = envelope["result"]["worktree"]
+        assert wt_summary and wt_summary["kept"] is False and wt_summary["removed"] is True
+        assert wt_summary["branch_deleted"] is True
+        # Filesystem + git ref verification
+        assert not os.path.exists(wt_path), "worktree dir should be gone"
+        out = subprocess.check_output(["git", "-C", repo, "branch", "--list", "codex/wt-merged"]).decode()
+        assert out.strip() == "", "branch should be deleted"
+        print("ok   worktree_merged_end: merged+clean worktree removed and branch deleted")
+    finally:
+        _core.load_session = orig_load
+        _core.resolve_pane_id = orig_resolve
+        _core.release_agent = orig_release
+        _core.close_pane = orig_close_pane
+        _core.delete_session = orig_delete
+finally:
+    shutil.rmtree(repo, ignore_errors=True)
+
+# Regression: worktree kept when the branch has unmerged commits (or is dirty).
+repo = tempfile.mkdtemp(prefix="codex-wt-unmerged-")
+try:
+    _gx(["init", "-q", "-b", "main"], repo)
+    _gx(["commit", "--allow-empty", "-q", "-m", "init"], repo)
+    wt_path = _core.worktree_create(repo, "codex/wt-unmerged", os.path.join(repo, ".worktrees", "codex-wt-unmerged"))
+    _gx(["commit", "--allow-empty", "-q", "-m", "unmerged-feature"], wt_path)
+    # Deliberately NOT merging.
+    orig_load = _core.load_session
+    orig_resolve = _core.resolve_pane_id
+    orig_release = _core.release_agent
+    orig_close_pane = _core.close_pane
+    orig_delete = _core.delete_session
+    rec = {"session": "cdx-wtu", "terminal_id": "tt", "mode": "tab",
+           "workspace_id": "w1", "keep": False, "keep_worktree": False,
+           "worktree": {"repo": repo, "branch": "codex/wt-unmerged",
+                        "path": wt_path, "caller_branch": "main", "keep": False}}
+    try:
+        _core.load_session = lambda s: rec
+        _core.resolve_pane_id = lambda r: "w1-10"
+        _core.release_agent = lambda p: None
+        _core.close_pane = lambda p: None
+        _core.delete_session = lambda s: None
+        import io
+        buf = io.StringIO()
+        sys_stdout = sys.stdout
+        sys.stdout = buf
+        try:
+            class EndArgs:
+                session = "cdx-wtu"
+            assert codex.cmd_end(EndArgs) == 0
+        finally:
+            sys.stdout = sys_stdout
+        envelope = json.loads(buf.getvalue())
+        wt_summary = envelope["result"]["worktree"]
+        assert wt_summary and wt_summary["kept"] is True
+        assert wt_summary["ahead"] == 1 and wt_summary["dirty"] is False
+        assert wt_summary["reason"] == "unmerged_commits"
+        # Filesystem + git ref verification — both survive
+        assert os.path.exists(wt_path), "worktree dir should be kept"
+        out = subprocess.check_output(["git", "-C", repo, "branch", "--list", "codex/wt-unmerged"]).decode()
+        assert "codex/wt-unmerged" in out, "branch should be kept"
+        print("ok   worktree_unmerged_end: unmerged worktree kept, branch preserved, reason reported")
+    finally:
+        _core.load_session = orig_load
+        _core.resolve_pane_id = orig_resolve
+        _core.release_agent = orig_release
+        _core.close_pane = orig_close_pane
+        _core.delete_session = orig_delete
+finally:
+    shutil.rmtree(repo, ignore_errors=True)
 
 # Regression: end closes an isolated workspace unless the session asks to keep it.
 orig_load_session = _core.load_session
