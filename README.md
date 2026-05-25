@@ -12,18 +12,48 @@ Claude Code ──run a codex.py verb in the background──▶  Codex (in a he
 
 ---
 
-## Install
+## Install · Update · Uninstall
 
-In Claude Code:
+All commands run inside Claude Code's slash prompt.
+
+### Install (first time)
 
 ```
 /plugin marketplace add yigitkonur/claude-code-herdr-plugin
 /plugin install claude-code-herdr-plugin
+/reload-plugins
 ```
 
-That's it. One skill loads and auto-activates when you delegate to Codex:
+What each line does:
+
+1. **`/plugin marketplace add yigitkonur/claude-code-herdr-plugin`** — registers this repo as a single-plugin marketplace (reads `.claude-plugin/marketplace.json` from `main`).
+2. **`/plugin install claude-code-herdr-plugin`** — installs the plugin from that marketplace (reads `.claude-plugin/plugin.json`).
+3. **`/reload-plugins`** — makes Claude Code pick up the new skill without restarting.
+
+One skill auto-activates when you delegate to Codex:
 
 - **`claude-to-codex`** — drives the sub-agent end-to-end (spawn, send, wait, analyze, end)
+
+### Update to a newer release
+
+```
+/plugin marketplace update claude-code-herdr-plugin
+/plugin install claude-code-herdr-plugin
+/reload-plugins
+```
+
+`marketplace update` refreshes the catalog from `main`; the subsequent `install` is what actually pulls the new files into your local plugin tree. The version number in [`.claude-plugin/plugin.json`](./.claude-plugin/plugin.json) is what Claude Code compares against to decide whether anything changed.
+
+> **Don't use `/plugin update <name>` for marketplace-sourced plugins.** In current Claude Code builds it can remove the marketplace instead of upgrading the plugin. Use the three-line update flow above.
+
+### Uninstall
+
+```
+/plugin uninstall claude-code-herdr-plugin
+/plugin marketplace remove claude-code-herdr-plugin
+```
+
+The first removes the installed plugin; the second forgets the marketplace registration so it does not reappear in `/plugin marketplace list`.
 
 ## Prerequisites
 
