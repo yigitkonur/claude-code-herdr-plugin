@@ -7,9 +7,10 @@ pip, no network); `codex.py` prints one JSON envelope to stdout and is safe to
 background via your Bash tool's `run_in_background: true`. Run it; don't read it
 into context.
 
-Invoke as `python3 ${SKILL_DIR}/scripts/codex.py …` where `${SKILL_DIR}` is this
-skill's directory (e.g. `~/.claude/skills/skill-herdr`). If a relative path fails
-to resolve, `cd` into the skill dir first or use the absolute path.
+Invoke as `python3 ${SKILL_DIR}/scripts/codex.py …` where `${SKILL_DIR}` is
+`${CLAUDE_PLUGIN_ROOT}/skills/claude-to-codex` (the plugin sets `CLAUDE_PLUGIN_ROOT`
+when active). If the expansion doesn't resolve in your shell, `cd` into the skill
+dir first or use the absolute path.
 
 For anything beyond a single Codex (parallel fleets, other agents, custom tooling),
 compose **raw herdr** commands directly — the substrate is documented across the
@@ -20,7 +21,9 @@ other `references/` files.
 ## `codex.py` — the single Codex interface
 
 ```
-codex.py start  --task "<p>" [--plan] [--expect PATH]... [--cwd DIR] [--label NAME]
+codex.py start  --task "<p>" --slug <safe-name>
+                [--in pane|tab|space] [--worktree] [--keep] [--keep-worktree]
+                [--plan] [--expect PATH]... [--cwd DIR]
                 [--marker STR] [--timeout 600] [--no-wait]
 codex.py send   --session <id> --message "<p>" [--expect PATH]... [--timeout 600]
 codex.py reply  --session <id> (--text "…" | --choice N | --approve | --reject)
