@@ -85,6 +85,9 @@ def caller_context(request, env=None):
     }
 
 
+MODES = ("pane", "tab", "space")
+
+
 def collision_free_label(request, workspace_id, base_label):
     existing = {
         t.get("label")
@@ -98,23 +101,81 @@ def collision_free_label(request, workspace_id, base_label):
     return f"{base_label}-{suffix}"
 
 
-def build_label(request, slug, target_workspace_id=None, env=None):
+def pane_collision_free(request, tab_id, base_label):
+    """Walk -2, -3, ... suffixes against existing pane labels in `tab_id`. Used for
+    pane mode where multiple Codex helpers can share a tab; the existing tab-level
+    helper checks tab labels, not pane labels, so a pane-scoped check is needed."""
+    panes = request("pane.list", {}).get("panes", [])
+    existing = {p.get("label") for p in panes if p.get("tab_id") == tab_id}
+    if base_label not in existing:
+        return base_label
+    suffix = 2
+    while f"{base_label}-{suffix}" in existing:
+        suffix += 1
+    return f"{base_label}-{suffix}"
+
+
+def build_label(request, slug, mode="tab", target_workspace_id=None,
+                target_tab_id=None, env=None):
+    """Compose a deterministic label per spawn mode and apply collision suffixing.
+
+    pane  -> label = <slug>; collision-scoped to panes within target_tab_id.
+             The caller's tab/space already provide context to the human, so the
+             pane label stays short. Applied via pane.rename after agent.start.
+    tab   -> label = <caller-space>-<caller-tab>-<slug>; collision-scoped to tabs
+             within target_workspace_id. Applied at tab.create time.
+    space -> workspace label = <caller-tab-name>; inner tab label = <slug>.
+             The workspace label already carries caller context, so prepending it
+             again to the inner tab would be redundant noise.
+    """
+    if mode not in MODES:
+        raise NamingError(f"unknown mode: {mode}; expected one of {MODES}")
     slug = validate_slug(slug)
     ctx = caller_context(request, env)
-    base = f"{ctx['space_name']}-{ctx['tab_name']}-{slug}"
-    label = collision_free_label(request, target_workspace_id or ctx["workspace_id"], base)
-    ctx.update({"slug": slug, "base_label": base, "label": label})
+    ctx.update({"slug": slug, "mode": mode})
+    if mode == "pane":
+        tab_id = target_tab_id or ctx["tab_id"]
+        base = slug
+        label = pane_collision_free(request, tab_id, base)
+        ctx.update({
+            "target_tab_id": tab_id,
+            "target_workspace_id": ctx["workspace_id"],
+            "base_label": base,
+            "label": label,
+        })
+    elif mode == "tab":
+        workspace_id = target_workspace_id or ctx["workspace_id"]
+        base = f"{ctx['space_name']}-{ctx['tab_name']}-{slug}"
+        label = collision_free_label(request, workspace_id, base)
+        ctx.update({
+            "target_workspace_id": workspace_id,
+            "base_label": base,
+            "label": label,
+        })
+    else:  # space
+        workspace_label = ctx["tab_name"]
+        inner_label = slug
+        ctx.update({
+            "workspace_label": workspace_label,
+            "base_label": inner_label,
+            "label": inner_label,
+        })
     return ctx
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Build a HERDR tab label from caller context.")
+    parser = argparse.ArgumentParser(description="Build a HERDR tab/pane/workspace label from caller context.")
     parser.add_argument("--slug", required=True)
-    parser.add_argument("--workspace", default=None, help="Target workspace for collision checks.")
+    parser.add_argument("--mode", choices=MODES, default="tab",
+                        help="Spawn target shape; controls label composition and collision scope.")
+    parser.add_argument("--workspace", default=None, help="Target workspace for tab-mode collision checks.")
+    parser.add_argument("--tab", default=None, help="Target tab for pane-mode collision checks.")
     parser.add_argument("--socket", default=os.path.expanduser("~/.config/herdr/herdr.sock"))
     args = parser.parse_args()
     try:
-        result = build_label(lambda m, p: rpc(args.socket, m, p), args.slug, args.workspace)
+        result = build_label(lambda m, p: rpc(args.socket, m, p), args.slug,
+                             mode=args.mode, target_workspace_id=args.workspace,
+                             target_tab_id=args.tab)
     except NamingError as e:
         print(str(e), file=sys.stderr)
         return 2

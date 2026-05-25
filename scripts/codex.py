@@ -210,7 +210,8 @@ def _prepare_spawn(args):
             target_workspace_id = wc["workspace"]["workspace_id"]
             isolated_workspace_id = target_workspace_id
             isolated_root_pane_id = wc["root_pane"]["pane_id"]
-            label_info = name_herdr_tab.build_label(_request, args.slug, target_workspace_id)
+            label_info = name_herdr_tab.build_label(
+                _request, args.slug, mode="tab", target_workspace_id=target_workspace_id)
             label = label_info["label"]
         except (KeyError, name_herdr_tab.NamingError, _core.HerdrError) as e:
             if isolated_workspace_id:
@@ -222,7 +223,7 @@ def _prepare_spawn(args):
                                "Check HERDR_PANE_ID and `herdr status`, then retry.", exit_code=3)
     elif args.slug:
         try:
-            label_info = name_herdr_tab.build_label(_request, args.slug)
+            label_info = name_herdr_tab.build_label(_request, args.slug, mode="tab")
             label = label_info["label"]
             target_workspace_id = label_info["workspace_id"]
         except (KeyError, name_herdr_tab.NamingError, _core.HerdrError) as e:
