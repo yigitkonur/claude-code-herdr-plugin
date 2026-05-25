@@ -25,6 +25,7 @@ Verified facts this encodes (from live Codex testing):
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -227,6 +228,14 @@ def close_workspace(workspace_id, socket_path=SOCKET_PATH):
     return rpc("workspace.close", {"workspace_id": workspace_id}, socket_path)
 
 
+def pane_rename(pane_id, label, socket_path=SOCKET_PATH):
+    """Apply a sidebar-visible label to a pane. `agent.start`'s `name` is the
+    agent-registry name (different namespace) — set the human-facing pane label
+    explicitly. Returns the rpc envelope; callers may ignore errors (rename
+    failure does not break the pane)."""
+    return rpc("pane.rename", {"pane_id": pane_id, "label": label}, socket_path)
+
+
 def list_panes(socket_path=SOCKET_PATH):
     resp = rpc("pane.list", {}, socket_path)
     return resp.get("result", {}).get("panes", [])
@@ -363,20 +372,38 @@ def _caller_workspace_id(socket_path=SOCKET_PATH):
     return None
 
 
-def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_id=None):
-    """Spawn Codex in a FULL-WIDTH pane of its own and wait until it is genuinely
-    input-ready. Returns {pane_id, terminal_id, tab_id, agent, registered}.
+def _wait_registered(pane_id, socket_path=SOCKET_PATH):
+    """After agent.start, poll pane.get until the agent integration hook has
+    registered the pane (or the REGISTER_TIMEOUT elapses). Then wait_until_ready
+    so the composer is actually accepting input. Returns the registered flag."""
+    registered = False
+    deadline = time.time() + REGISTER_TIMEOUT
+    while time.time() < deadline:
+        g = rpc("pane.get", {"pane_id": pane_id}, socket_path)
+        if "result" in g and g["result"]["pane"].get("agent"):
+            registered = True
+            break
+        time.sleep(0.5)
+    wait_until_ready(pane_id, REGISTER_TIMEOUT, socket_path)
+    return registered
 
-    Why a dedicated tab: agent.start splits the focused tab, and a narrow split
-    (~28 cols when several panes share a tab) makes Codex hard-wrap and ellipsize
-    its plans and menu options ("Yes, impleme…"), corrupting what we parse. We
-    create an unfocused tab, start Codex in it, then close the leftover root
-    shell so Codex fills the tab (~130 cols verified) — clean plans, clean
-    option labels.
 
-    The tab is pinned to the caller's workspace (_caller_workspace_id) so Codex
-    lands in the orchestrator's space, not herdr's ambient-focused one. It must
-    remain unfocused: this is a background helper, not a human attention switch.
+def spawn_codex_tab(workspace_id, label, cwd=None, argv=None, socket_path=SOCKET_PATH):
+    """Spawn Codex in a FULL-WIDTH pane in a NEW unfocused tab inside `workspace_id`.
+
+    Why a dedicated tab: agent.start splits the focused tab by default, and a
+    narrow split (~28 cols when several panes share a tab) makes Codex hard-wrap
+    and ellipsize its plans and menu options ("Yes, impleme…"), corrupting what
+    we parse. We create an unfocused tab, start Codex in it, then close the
+    leftover root shell so Codex fills the tab (~130 cols verified) — clean
+    plans, clean option labels.
+
+    The tab is pinned to `workspace_id` (caller-resolved via _caller_workspace_id
+    when omitted) so Codex lands in the orchestrator's space, not herdr's
+    ambient-focused one. It stays unfocused: this is a background helper, not
+    a human attention switch.
+
+    Returns {pane_id, terminal_id, tab_id, agent, registered}.
     """
     if workspace_id is None:
         workspace_id = _caller_workspace_id(socket_path)
@@ -407,19 +434,200 @@ def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_i
     time.sleep(0.5)
     pane_id = _pane_id_for_terminal(terminal_id, socket_path) or ag["pane_id"]
 
-    registered = False
-    deadline = time.time() + REGISTER_TIMEOUT
-    while time.time() < deadline:
-        g = rpc("pane.get", {"pane_id": pane_id}, socket_path)
-        if "result" in g and g["result"]["pane"].get("agent"):
-            registered = True
-            break
-        time.sleep(0.5)
-    # Registration != input-ready: Codex keeps doing MCP handshakes / TUI paint
-    # after its SessionStart->idle, and a send in that window is silently lost.
-    wait_until_ready(pane_id, REGISTER_TIMEOUT, socket_path)
+    registered = _wait_registered(pane_id, socket_path)
     return {"pane_id": pane_id, "terminal_id": terminal_id, "tab_id": tab_id,
             "agent": ag.get("agent") or "codex", "registered": registered}
+
+
+def spawn_codex_pane(caller_tab_id, label, cwd=None, argv=None, socket_path=SOCKET_PATH):
+    """Spawn Codex as a NEW PANE split off inside `caller_tab_id` (caller's tab).
+    Caller pane keeps focus (focus=False), so the human's view doesn't shift.
+
+    Width caveat: this split halves the focused pane in that tab. With one caller
+    pane in the tab, Codex gets ~half-width (~65 cols typical) — workable for
+    plan/menu parsing. With many panes already sharing a tab, splits shrink
+    each pane further; below ~28 cols Codex output ellipsizes. The choice to
+    stay in pane mode under load is deliberate per SKILL.md mode-selection
+    guidance; the parser degrades, the spawn does not fail.
+
+    After spawn, applies `pane.rename` so the new pane carries the slug in
+    herdr's sidebar (agent.start's `name` is the agent-registry namespace, not
+    the pane label).
+
+    Returns {pane_id, terminal_id, tab_id, agent, registered}.
+    """
+    params = {
+        "name": label,
+        "tab_id": caller_tab_id,
+        "split": "right",
+        "focus": False,
+        "argv": argv or ["codex"],
+    }
+    if cwd:
+        params["cwd"] = cwd
+    resp = rpc("agent.start", params, socket_path)
+    if "error" in resp:
+        raise HerdrError("SPAWN_FAILED", f"agent.start (pane) failed: {resp['error']}")
+    ag = resp["result"]["agent"]
+    terminal_id = ag.get("terminal_id")
+    pane_id = ag["pane_id"]
+    pane_rename(pane_id, label, socket_path)  # best-effort; non-fatal on error
+    registered = _wait_registered(pane_id, socket_path)
+    # Re-resolve the pane id after any racey close in this tab (sibling spawns
+    # in parallel can renumber slot ids); terminal_id is stable.
+    live = _pane_id_for_terminal(terminal_id, socket_path)
+    if live:
+        pane_id = live
+    return {"pane_id": pane_id, "terminal_id": terminal_id, "tab_id": caller_tab_id,
+            "agent": ag.get("agent") or "codex", "registered": registered}
+
+
+def spawn_codex_space(workspace_label, inner_label, cwd=None, argv=None,
+                      socket_path=SOCKET_PATH):
+    """Spawn Codex in a fresh UNFOCUSED workspace + tab.
+
+    Creates the workspace (label = workspace_label), starts Codex inside via
+    spawn_codex_tab, then closes the leftover workspace root shell so only
+    Codex's pane remains. Rolls back the workspace on any spawn failure.
+
+    Returns spawn_codex_tab's dict augmented with `workspace_id` (the new
+    workspace id — caller stores it to close on session end).
+    """
+    wc_params = {"focus": False, "label": workspace_label}
+    if cwd:
+        wc_params["cwd"] = cwd
+    wc = rpc("workspace.create", wc_params, socket_path)
+    if "error" in wc:
+        raise HerdrError("SPAWN_FAILED", f"workspace.create failed: {wc['error']}")
+    workspace_id = wc["result"]["workspace"]["workspace_id"]
+    root_pane_id = wc["result"]["root_pane"]["pane_id"]
+    try:
+        info = spawn_codex_tab(workspace_id, inner_label, cwd=cwd, argv=argv,
+                               socket_path=socket_path)
+    except HerdrError:
+        try:
+            close_workspace(workspace_id, socket_path)
+        except HerdrError:
+            pass
+        raise
+    # Close the workspace's leftover root shell. This renumbers panes, so
+    # re-resolve Codex's pane id from its stable terminal_id afterwards.
+    try:
+        close_pane(root_pane_id, socket_path)
+        live = _pane_id_for_terminal(info["terminal_id"], socket_path)
+        if live:
+            info["pane_id"] = live
+    except HerdrError:
+        pass
+    info["workspace_id"] = workspace_id
+    return info
+
+
+# Backwards-compat alias: the old single entry point. Removed in commit 3 once
+# codex.py dispatches the per-mode helpers directly.
+def spawn_codex(label, cwd=None, argv=None, socket_path=SOCKET_PATH, workspace_id=None):
+    return spawn_codex_tab(workspace_id, label, cwd=cwd, argv=argv, socket_path=socket_path)
+
+
+# ---------------------------------------------------------------------------
+# Worktree helpers (git-level, decoupled from herdr)
+# ---------------------------------------------------------------------------
+# `herdr worktree create` always materializes a workspace bound to the worktree
+# (verified via probe), which forces a topology that doesn't fit --in pane/tab.
+# Using `git worktree add` directly keeps --worktree truly orthogonal to --in.
+def _git(args, cwd=None, timeout=30):
+    """Run `git <args>` capturing stdout+stderr. Returns (rc, output:str)."""
+    try:
+        out = subprocess.check_output(
+            ["git"] + args, cwd=cwd, stderr=subprocess.STDOUT, timeout=timeout)
+        return 0, out.decode(errors="replace").strip()
+    except subprocess.CalledProcessError as e:
+        return e.returncode, e.output.decode(errors="replace").strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        return -1, str(e)
+
+
+def repo_root(cwd=None):
+    """Absolute path to the repo containing `cwd` (or the current directory).
+    Returns None if `cwd` is not inside a git working tree."""
+    rc, out = _git(["rev-parse", "--show-toplevel"], cwd=cwd or os.getcwd())
+    return out if rc == 0 and out else None
+
+
+def current_branch(repo):
+    """Current branch in `repo`, or '' when detached / unknown."""
+    rc, out = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
+    return out if rc == 0 and out and out != "HEAD" else ""
+
+
+def branch_exists(repo, branch):
+    rc, _ = _git(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo)
+    return rc == 0
+
+
+def unique_branch(repo, base):
+    """Walk -2,-3,... suffixes until a branch name is free. Caller is responsible
+    for slug-safety of `base`; we only resolve collisions."""
+    if not branch_exists(repo, base):
+        return base
+    i = 2
+    while branch_exists(repo, f"{base}-{i}"):
+        i += 1
+    return f"{base}-{i}"
+
+
+def worktree_create(repo, branch, path, base="HEAD"):
+    """Create a worktree at `path` checked out on a NEW branch `branch` forked
+    from `base`. Returns the absolute path. Raises HerdrError on failure so the
+    caller can surface a clean verdict."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    rc, out = _git(["worktree", "add", "-b", branch, path, base], cwd=repo)
+    if rc != 0:
+        raise HerdrError("WORKTREE_FAILED", f"git worktree add failed: {out}")
+    return os.path.abspath(path)
+
+
+def worktree_status(repo, worktree_path, caller_branch):
+    """Inspect a worktree for auto-remove eligibility. Returns:
+        {branch, ahead, dirty} where
+        ahead -- commits in worktree branch NOT in caller branch (-1 = unknown)
+        dirty -- working tree has uncommitted changes (True on unknown, so the
+                 conservative default is keep, not delete).
+    """
+    rc, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=worktree_path)
+    if rc != 0:
+        branch = ""
+    if branch and caller_branch:
+        rc, count = _git(["rev-list", "--count", f"{caller_branch}..{branch}"], cwd=repo)
+        try:
+            ahead = int(count) if rc == 0 else -1
+        except ValueError:
+            ahead = -1
+    else:
+        ahead = -1
+    rc, porcelain = _git(["status", "--porcelain"], cwd=worktree_path)
+    dirty = True if rc != 0 else bool(porcelain.strip())
+    return {"branch": branch, "ahead": ahead, "dirty": dirty}
+
+
+def worktree_remove(repo, worktree_path, branch=None, force=True):
+    """Best-effort removal. Always tries the worktree; deletes the branch only
+    when supplied. Returns {removed, branch_deleted, errors:[]} for the verdict.
+    """
+    out = {"removed": False, "branch_deleted": False, "errors": []}
+    args = ["worktree", "remove"] + (["--force"] if force else []) + [worktree_path]
+    rc, msg = _git(args, cwd=repo)
+    if rc == 0:
+        out["removed"] = True
+    else:
+        out["errors"].append(f"worktree remove: {msg}")
+    if branch:
+        rc, msg = _git(["branch", "-D", branch], cwd=repo)
+        if rc == 0:
+            out["branch_deleted"] = True
+        else:
+            out["errors"].append(f"branch -D: {msg}")
+    return out
 
 
 def send_task_verified(pane_id, text, socket_path=SOCKET_PATH, tries=4):
