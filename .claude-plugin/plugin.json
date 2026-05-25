@@ -1,0 +1,19 @@
+{
+  "name": "claude-code-herdr-plugin",
+  "version": "1.0.0",
+  "description": "Drive a Codex sub-agent from Claude Code through a herdr pane with one JSON verdict per turn — no screen-scraping, no status polling.",
+  "author": {
+    "name": "Yigit Konur"
+  },
+  "homepage": "https://github.com/yigitkonur/claude-code-herdr-plugin",
+  "repository": "https://github.com/yigitkonur/claude-code-herdr-plugin",
+  "license": "MIT",
+  "keywords": [
+    "herdr",
+    "claude-code",
+    "codex",
+    "agent-orchestration",
+    "subagent",
+    "skills"
+  ]
+}

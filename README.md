@@ -1,4 +1,4 @@
-# herdr-claude-plugin
+# claude-code-herdr-plugin
 
 > Unofficial · v1.0.0 · MIT · Not affiliated with the herdr project or Anthropic.
 
@@ -17,8 +17,8 @@ Claude Code ──run a codex.py verb in the background──▶  Codex (in a he
 In Claude Code:
 
 ```
-/plugin marketplace add yigitkonur/herdr-claude-to-codex
-/plugin install herdr-claude-plugin
+/plugin marketplace add yigitkonur/claude-code-herdr-plugin
+/plugin install claude-code-herdr-plugin
 ```
 
 That's it. Two skills load and auto-activate when you delegate to Codex:

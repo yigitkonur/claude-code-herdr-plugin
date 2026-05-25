@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Track the plugin manifest dir even when a global gitignore hides dotfiles.
+!.claude-plugin/
+!.claude-plugin/**
