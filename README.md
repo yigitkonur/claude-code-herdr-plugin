@@ -21,10 +21,9 @@ In Claude Code:
 /plugin install claude-code-herdr-plugin
 ```
 
-That's it. Two skills load and auto-activate when you delegate to Codex:
+That's it. One skill loads and auto-activates when you delegate to Codex:
 
-- **`claude-to-codex`** — drives the sub-agent (the whole machinery)
-- **`name-herdr-tab`** — utility for deterministic pane/tab/workspace labels
+- **`claude-to-codex`** — drives the sub-agent end-to-end (spawn, send, wait, analyze, end)
 
 ## Prerequisites
 
@@ -193,17 +192,16 @@ Then run the two `/plugin` commands above. The Python tool, session-state locati
   plugin.json                # v1.0.0 plugin manifest
   marketplace.json           # single-plugin marketplace pointing at ./
 skills/
-  claude-to-codex/           # main skill — drive Codex from Claude Code
+  claude-to-codex/           # the only skill — drives Codex from Claude Code
     SKILL.md                 # the skill contract Claude Code loads (start here)
     scripts/
       codex.py               # the single Codex interface (agent-facing)
       _core.py               # shared engine: registry, spawn/send/wait, analyzer
+      name_herdr_tab.py      # internal: slug validation + deterministic labels
       test_analyze.py        # deterministic regression test (no spawning)
       herdr_client/          # vendored herdr socket client (Apache-2.0)
     references/              # 15 single-topic deep-dives (load on demand)
-  name-herdr-tab/            # utility skill — deterministic tab/pane/workspace labels
-    SKILL.md
-    scripts/name_herdr_tab.py
+LICENSE                      # MIT (top level)
 README.md                    # this file
 ```
 
