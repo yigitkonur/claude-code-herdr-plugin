@@ -400,12 +400,26 @@ def _monitor_hint(session_id, expect, timeout):
             "persistent": False}
 
 
+def _emit_sent(command, session_id):
+    """Minimal 'input sent, not waiting' envelope — for the watch flow, where an
+    armed watch streams the next state so the send/reply itself need not block."""
+    _emit(command, ok=True, session=session_id, result={
+        "state": "working", "reason": "no_wait", "summary": "Input sent; not waiting.",
+        "plan": None, "questions": [], "options": [], "marker_found": False,
+        "artifacts": [], "transcript_tail": "",
+        "next_action": {"intent": "wait", "command": None,
+                        "why": "Input sent; an armed watch will stream the next state."}})
+    return 0
+
+
 def cmd_send(args):
     resolved, code = _resolve("send", args.session)
     if resolved is None:
         return code
     rec, pane_id = resolved
     _core.send_task_verified(pane_id, _with_marker_reminder(args.message, rec.get("marker")))
+    if getattr(args, "no_wait", False):
+        return _emit_sent("send", args.session)
     return _verdict("send", args.session, pane_id, rec.get("marker"), args.expect, args.timeout)
 
 
@@ -434,6 +448,8 @@ def cmd_reply(args):
         keys = ["Down"] * (n - 1) + ["Enter"]
         _core.send_keys(pane_id, keys)
         _core.await_started(pane_id)                  # the choice triggers more work
+    if getattr(args, "no_wait", False):
+        return _emit_sent("reply", args.session)
     return _verdict("reply", args.session, pane_id, rec.get("marker"), args.expect, args.timeout)
 
 
@@ -734,6 +750,8 @@ def build_parser():
     s = sub.add_parser("send", help="Send a follow-up to a live session.")
     s.add_argument("--session", required=True)
     s.add_argument("--message", required=True)
+    s.add_argument("--no-wait", action="store_true",
+                   help="Send but don't wait for a verdict (let an armed watch report).")
     add_wait_flags(s)
     s.set_defaults(fn=cmd_send)
 
@@ -743,6 +761,8 @@ def build_parser():
     s.add_argument("--choice", type=int, default=None, help="Pick option N from a menu/widget.")
     s.add_argument("--approve", action="store_true", help="Approve (select option 1 / Yes).")
     s.add_argument("--reject", action="store_true", help="Reject / cancel (Esc).")
+    s.add_argument("--no-wait", action="store_true",
+                   help="Send the reply but don't wait for a verdict (let an armed watch report).")
     add_wait_flags(s)
     s.set_defaults(fn=cmd_reply)
 
