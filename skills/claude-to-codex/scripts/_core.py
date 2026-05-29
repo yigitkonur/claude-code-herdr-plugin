@@ -57,6 +57,10 @@ SETTLED = {"idle", "done", "blocked"}
 TAIL_LINES = 60                # read enough to capture a plan block + menu
 TAIL_CHARS = 2000              # hard char cap on transcript_tail (a flood of long
                                # lines can blow the line budget's byte size)
+LIVE_LINES = 24                # the CURRENT-prompt region at the bottom of the visible
+                               # screen; interactive state (question/menu/widget/plan-
+                               # menu/marker) is detected here so a stale prompt left in
+                               # scrollback during an idle blip can't be re-reported.
 SETTLE_DELAY = 0.8             # status event can beat the screen paint
 RECHECK_TRIES = 5              # re-read while a long plan/menu finishes painting
 RECHECK_DELAY = 1.0
@@ -806,6 +810,10 @@ def _extract_questions(tail):
     """Free-text and numbered questions at the bottom (lines ending with '?')."""
     qs = []
     for ln in _bottom(tail, 14):
+        # The composer's rotating placeholder (on the ›-prefixed input line) can end
+        # in '?' (e.g. "› What does this codebase do?"); it is NOT an agent question.
+        if _PROMPT_RE.match(ln) and _PLACEHOLDER_HINTS.search(ln):
+            continue
         if ln.endswith("?"):
             # strip leading bullets/glyphs and any "1." / "›" numbering
             q = re.sub(r"^\s*[•›>*\-]+\s*", "", ln)
@@ -906,26 +914,34 @@ def _clean_tail(tail, keep=28, marker=None):
     return "\n".join(block)
 
 
-def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="codex.py"):
-    """Return the structured `result` block for the envelope."""
+def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="codex.py",
+            screen=None):
+    """Return the structured `result` block for the envelope.
+
+    `tail` is the full recent transcript (used for the plan body and the cleaned
+    transcript_tail). `screen` is the CURRENT visible screen; interactive and
+    completion state (question / menu / widget / plan-menu / marker / done-prose)
+    are detected from it so a just-answered question or a stale menu lingering in
+    scrollback during a mid-generation idle blip can't be re-reported. `screen`
+    defaults to `tail` (deterministic tests feed one crafted screen)."""
     expect = expect or []
     artifacts = [{"path": p, "exists": os.path.exists(p),
                   "bytes": (os.path.getsize(p) if os.path.exists(p) else 0)} for p in expect]
-    # `tail` is the full recent transcript. Current state lives at the BOTTOM
-    # (the live screen); scoping the detectors there avoids matching a stale
-    # menu/marker/question left in scrollback from an earlier turn. The plan,
-    # which can be long, is extracted from the FULL transcript and never cut.
-    bottom = "\n".join(tail.splitlines()[-48:])
-    is_widget = bool(_WIDGET_RE.search(bottom))
-    is_plan_menu = bool(_PLAN_MENU_RE.search(bottom))
-    options = _parse_options(bottom)
-    questions = _extract_questions(bottom)
+    # Interactive/completion state lives at the bottom of the CURRENT screen. Scope
+    # the detectors to that live region (not deep scrollback) so stale content from
+    # an earlier turn is never matched. The plan body (long) is still extracted from
+    # the full recent `tail`, and never truncated.
+    live = "\n".join((screen or tail).splitlines()[-LIVE_LINES:])
+    is_widget = bool(_WIDGET_RE.search(live))
+    is_plan_menu = bool(_PLAN_MENU_RE.search(live))
+    options = _parse_options(live)
+    questions = _extract_questions(live)
     # Extract the plan ONLY while the approval menu is up. Once approved, the
     # "Implement this plan?" stop-marker is gone and a plan header lingers in
     # scrollback, so an unguarded extract would swallow the whole implementation
     # log into `plan` (token bloat + would overwrite the clean stored plan).
     plan = _extract_plan(tail) if is_plan_menu else None
-    marker_found = _marker_on_own_line(marker, bottom)
+    marker_found = _marker_on_own_line(marker, live)
     clean = _clean_tail(tail, marker=marker) or ""
 
     def _na(intent, args, why):
@@ -940,7 +956,15 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
     summary = ""
 
     if status == "blocked":
-        if is_widget:
+        if is_plan_menu:
+            # A plan-approval menu usually reports idle/done, but can surface as
+            # blocked depending on the Codex build — classify it as approval either way.
+            state, reason = "awaiting_approval", "plan_approval"
+            summary = "Codex proposed a plan and is waiting for approval."
+            questions = []
+            next_action = _na("approve", f"reply --session <id> --approve",
+                              "Approve to implement, or --reject to keep planning. Plan is in result.plan.")
+        elif is_widget:
             state, reason = "awaiting_clarification", "multiple_choice"
             summary = "Codex is asking a structured multiple-choice question."
             next_action = _na("choose", f"reply --session <id> --choice <N>",
@@ -985,7 +1009,7 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
             summary = "Expected artifacts exist (no marker printed)."
             next_action = _na("verify", f"status --session <id>",
                               "No completion marker, but expected files exist — confirm content.")
-        elif _looks_done(bottom):
+        elif _looks_done(live):
             # Codex often finishes without printing the marker, reporting in prose
             # instead. With no marker AND no --expect this would otherwise read as
             # no_signal for a SUCCESSFUL task; a confident past-tense completion
@@ -998,7 +1022,7 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
         else:
             state, reason = "no_signal", "no_signal"
             summary = "Turn ended with no completion marker, question, or menu."
-            uncertain = bool(_UNCERTAINTY_RE.search("\n".join(_bottom(tail, 8))))
+            uncertain = bool(_UNCERTAINTY_RE.search("\n".join(_bottom(live, 8))))
             why = ("Last message reads uncertain — likely an implicit question; read the tail."
                    if uncertain else "Read result.transcript_tail to judge; may be done without a marker.")
             next_action = _na("verify", f"status --session <id>", why)

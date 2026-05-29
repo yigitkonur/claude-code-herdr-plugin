@@ -15,8 +15,8 @@ missing = "/tmp/does_not_exist_zzz_%d.txt" % os.getpid()
 STATUSBAR = "  gpt-5.5 xhigh · ~/proj · Context 3% used"
 
 cases = []
-def case(name, status, tail, marker, expect, want_state, want_reason, want_intent):
-    cases.append((name, status, tail, marker, expect, want_state, want_reason, want_intent))
+def case(name, status, tail, marker, expect, want_state, want_reason, want_intent, screen=None):
+    cases.append((name, status, tail, marker, expect, want_state, want_reason, want_intent, screen))
 
 # 1. completed / marker_verified
 case("marker_verified", "done",
@@ -92,9 +92,33 @@ case("intent_not_done", "done",
      f"I'll create the file and verify it next.\n{STATUSBAR}",
      MARK, [], "no_signal", "no_signal", "verify")
 
+# 14. stale question in scrollback, fresh VISIBLE screen -> ignore the stale question.
+# (Live bug: reply --choice settled on a blip and re-reported the answered question.)
+case("stale_question_scrollback", "done",
+     "Which database should I target?\n• Proposed Plan\n# Add Feature\n## Summary\n"
+     f"Building the feature.\n{STATUSBAR}",
+     MARK, [], "no_signal", "no_signal", "verify",
+     screen=f"# Add Feature\n## Summary\nBuilding the feature.\n{STATUSBAR}")
+
+# 15. stale numbered menu in scrollback, fresh VISIBLE screen -> not multiple_choice.
+case("stale_menu_scrollback", "done",
+     "Pick one:\n1. Modern\n2. Classic\n3. Vintage\n• Going with Modern.\n"
+     f"• Working on the layout.\n{STATUSBAR}",
+     MARK, [], "no_signal", "no_signal", "verify",
+     screen=f"• Going with Modern.\n• Working on the layout.\n{STATUSBAR}")
+
+# 16. plan-approval menu surfacing as `blocked` (build-dependent) -> still plan_approval.
+case("blocked_plan_menu", "blocked", PLAN + f"\n{STATUSBAR}",
+     MARK, [], "awaiting_approval", "plan_approval", "approve")
+
+# 17. composer rotating placeholder ending in '?' is NOT an agent question.
+case("placeholder_not_question", "done",
+     f"• Here is a summary of the code.\n› What does this codebase do?\n{STATUSBAR}",
+     MARK, [], "no_signal", "no_signal", "verify")
+
 fails = 0
-for name, status, tail, marker, expect, ws, wr, wi in cases:
-    r = _core.analyze(status, tail, marker, expect, "cdx-test", "codex.py")
+for name, status, tail, marker, expect, ws, wr, wi, screen in cases:
+    r = _core.analyze(status, tail, marker, expect, "cdx-test", "codex.py", screen=screen)
     got = (r["state"], r["reason"], r["next_action"]["intent"])
     ok = got == (ws, wr, wi)
     if not ok:
@@ -127,6 +151,17 @@ pa = _core.analyze("done", post_approval, MARK, [], "x", "codex.py")
 assert pa["plan"] is None, f"plan should be None post-approval, got {len(pa['plan'] or '')} chars"
 assert pa["state"] == "completed", f"expected completed post-approval, got {pa['state']}"
 print("ok   post_approval_plan_none: plan not ballooned on a completed verdict")
+
+# Contrast: the recent transcript alone (no `screen`) re-reports a stale, already-answered
+# question — the live bug; passing the fresh visible `screen` suppresses it.
+stale_tail = ("Which database should I target?\n• Proposed Plan\n# Add Feature\n"
+              "## Summary\nBuilding the feature.\n" + STATUSBAR)
+bug = _core.analyze("done", stale_tail, MARK, [], "x", "codex.py")
+assert bug["reason"] == "free_text_question", f"stale-tail bug repro changed: {bug['reason']}"
+fix = _core.analyze("done", stale_tail, MARK, [], "x", "codex.py",
+                    screen="# Add Feature\n## Summary\nBuilding the feature.\n" + STATUSBAR)
+assert fix["reason"] == "no_signal", f"screen-scoped analyze should ignore stale Q, got {fix['reason']}"
+print("ok   stale_question_scoped_to_screen: visible-screen scoping suppresses stale scrollback Q")
 
 # transcript_tail must be clean: drop the Codex banner box, the ›-prefixed prompt
 # echo / composer placeholder, and Codex's internal-skill reads — keep the real
