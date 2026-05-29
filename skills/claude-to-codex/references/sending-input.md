@@ -29,6 +29,10 @@ Use `pane run` when:
 
 The atomicity matters: with `pane send-text` + `pane send-keys Enter` you get two IPCs and a tiny race window where another bash call could squeeze bytes in between. `pane run` closes that.
 
+### Atomic ≠ accepted — verify the send landed
+
+`pane run`'s text+Enter is atomic at the IPC layer, but the receiving **TUI can still drop the Enter** during its startup/redraw churn — the text lands in the composer and is never submitted. **Verified live:** a `pane run` to a still-initializing Claude pane *pasted but did not push* — the prompt sat unsent behind the `›` glyph while the agent stayed `idle`, and nothing ran. So when you drive an **agent** (not a plain bash pane), don't fire-and-forget: after the send, confirm it took — the pane's `agent_status` flipped to `working`, **or** its composer no longer holds your text — and re-send `Enter` (or the whole prompt) if not. `scripts/codex.py` does exactly this two-phase verified submit (`send_task_verified`); replicate it whenever you drive a raw agent.
+
 ### Argument joining
 
 CLI args after the pane id are joined with single spaces:
@@ -208,6 +212,7 @@ CLI calls add ~25 ms each (subprocess startup). For high-frequency sends, talk d
 ## Anti-patterns
 
 - **`pane send-text "cmd" && pane send-keys Enter`** — works but is two IPCs and racy. Use `pane run`.
+- **Fire-and-forget `pane run` to an agent.** The Enter can be eaten during the agent's init/redraw and the prompt sits unsent in the composer. Verify it landed (agent went `working` / composer cleared) and re-send.
 - **Multi-line text into a bash pane without checking bracketed paste** — silent multi-command execution.
 - **`pane send-keys $PANE F1`** — `F1` isn't in the vocabulary. Fails atomically.
 - **`pane send-keys $PANE Ctrl-c`** — wrong syntax. Use `C-c` or `ctrl+c` (lowercase plus).
