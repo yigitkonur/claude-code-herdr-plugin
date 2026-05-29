@@ -1,6 +1,6 @@
 # claude-code-herdr-plugin
 
-> unofficial · v1.2.5 · mit · not affiliated with herdr or anthropic.
+> unofficial · v1.3.0 · mit · not affiliated with herdr or anthropic.
 
 **hand a task to codex from inside claude code — and get back one clean json verdict per turn instead of screen-scraping a terminal.** claude spins codex up in a background herdr pane, watches it, and tells you exactly what happened: done, asking a question, waiting on a plan, or stuck. you never poll, never parse a tui, never lose your place.
 
