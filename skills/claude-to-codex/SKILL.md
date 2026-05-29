@@ -1,6 +1,6 @@
 ---
 name: claude-to-codex
-description: Drive a Codex sub-agent from Claude Code over a herdr pane. ALWAYS invoke when delegating to a Codex sub-agent ("have codex do X", "run this in the background", "start this task", "send this payload", "continue this session") or to Pi/Claude/OpenCode/Hermes, running agents in parallel, spawning a side pane, waiting for an agent to finish, reading another agent's output, approving its prompts, or when the user mentions herdr (pane, agent, send, wait, run, split) or HERDR_PANE_ID is set. For Codex, drive everything through ONE tool — scripts/codex.py (start/send/reply/await/status/end/sessions) — run it in the background, read its single JSON verdict, do result.next_action. Python encodes the spawn-readiness race, verified send, full-width capture, marker+verification completion, never-truncated plans, session continuity across pane-slot shifts, structured pause reasons (question vs plan-menu vs blocked widget), and cleanup. References cover the herdr substrate (namespaces, parallel fleets, raw IPC, traps) beyond a single Codex.
+description: Drive a Codex sub-agent from Claude Code over a herdr pane. ALWAYS invoke when delegating to a Codex sub-agent ("have codex do X", "run this in the background", "start this task", "send this payload", "continue this session") or to Pi/Claude/OpenCode/Hermes, running agents in parallel, spawning a side pane, waiting for an agent to finish, reading another agent's output, approving its prompts, or when the user mentions herdr (pane, agent, send, wait, run, split) or HERDR_PANE_ID is set. For Codex, drive everything through ONE tool — scripts/codex.py (start/watch/send/reply/await/status/end/sessions). The recommended flow is event-driven: `start --no-wait` to spawn, then arm the Monitor tool with `codex.py watch` to STREAM one JSON verdict per state change (question, plan, completion); react with `reply`; it auto-approves permission gates, auto-engages plan mode when the task mentions a plan, and self-closes on verified success. (A one-shot mode — background a blocking verb, read its single verdict — still works.) Python encodes the spawn-readiness race, verified send, full-width capture, marker+verification completion, never-truncated plans, session continuity across pane-slot shifts, structured pause reasons (question vs plan-menu vs blocked widget), and cleanup. References cover the herdr substrate (namespaces, parallel fleets, raw IPC, traps) beyond a single Codex.
 ---
 
 # herdr — drive a Codex sub-agent from Claude Code
@@ -29,16 +29,17 @@ The user delegates to Codex or another agent (*"have codex do X"*, *"let pi hand
 
 | Verb | Does |
 |---|---|
-| `start --task "<p>" --slug <name>` | Spawn Codex (pane/tab/space per `--in`) + inject task (auto marker + "ask, don't guess") + wait + analyze → returns a `session` id + verdict |
-| `send --session <id> --message "<p>"` | Follow-up to a live session + wait + analyze |
-| `reply --session <id> (--text "…" \| --choice N \| --approve \| --reject)` | Answer a question / pick an option / approve / reject + wait + analyze |
+| `start --task "<p>" --slug <name>` | Spawn Codex (pane/tab/space per `--in`) + inject task (auto marker + "ask, don't guess") + wait + analyze → returns a `session` id + verdict. `--no-wait` returns immediately with a ready-to-arm `result.monitor` watch command instead. |
+| `watch --session <id>` | **Stream** one JSON verdict per state change (JSONL) until the task completes/exits — arm it with the **Monitor tool**. Auto-approves permission gates, surfaces plans/questions as events, self-closes on verified success. |
+| `send --session <id> --message "<p>"` | Follow-up to a live session + wait + analyze. `--no-wait` to fire-and-let-watch-report. |
+| `reply --session <id> (--text "…" \| --choice N \| --approve \| --reject)` | Answer a question / pick an option / approve / reject + wait + analyze. `--no-wait` to fire-and-let-watch-report. |
 | `await --session <id>` | Re-enter the wait, no new input (e.g. after a longer task) |
 | `status --session <id>` | One-shot snapshot, **no** wait |
 | `end --session <id>` | Close the pane + delete state (cleanup) |
 | `sessions` | List live sessions; prune dead ones |
 
 **Minimum call:** `codex.py start --task "<plain-language task>" --slug <safe-name>` — Python injects the completion contract; you supply no markers or prompt scaffolding. `--slug` is required: it names the pane/tab/workspace/worktree deterministically across spawns and is the multi-agent contract.
-**Flags:** `--slug <safe-name>` (required) · `--in pane|tab|space` (default `pane`; env `CODEX_IN`) · `--worktree` (orthogonal; new git worktree on `codex/<slug>`, env `CODEX_WORKTREE=1`) · `--keep` (skip teardown on `end`, env `CODEX_KEEP=1`) · `--keep-worktree` (env `CODEX_KEEP_WORKTREE=1`) · `--plan` · `--expect <path>` (repeatable) · `--timeout <sec>` (default 600) · `--cwd <dir>` · `--marker <STR>` · `--no-wait`.
+**Flags:** `--slug <safe-name>` (required) · `--in pane|tab|space` (default `pane`; env `CODEX_IN`) · `--worktree` (orthogonal; new git worktree on `codex/<slug>`, env `CODEX_WORKTREE=1`) · `--keep` (skip teardown on `end`, env `CODEX_KEEP=1`) · `--keep-worktree` (env `CODEX_KEEP_WORKTREE=1`) · `--plan` / `--no-plan` (force / disable plan mode; auto-engaged when the task says "plan") · `--expect <path>` (repeatable) · `--timeout <sec>` (default 600) · `--cwd <dir>` · `--marker <STR>` · `--no-wait` (return immediately with a `result.monitor` watch command). **watch flags:** `--no-auto-approve` (surface gates), `--no-close` (keep pane on success), `--timeout <sec>` (watch lifetime, default 1800). **send/reply:** `--no-wait` (fire, let an armed watch report).
 
 ## Mode selection (`--in`)
 
@@ -54,12 +55,34 @@ All three modes spawn unfocused — the human's view never shifts. Pick by inten
 
 **`--worktree`** is orthogonal. Add it when the task changes code that shouldn't pollute the caller's working tree: creates `<repo>/.worktrees/codex-<slug>` on a fresh `codex/<slug>` branch from HEAD, then passes that path as cwd to the chosen `--in` mode. On `end`, the worktree is removed **only if** the branch is fully merged into the caller branch AND the working tree is clean; otherwise it is kept and the verdict reports `worktree.{kept, ahead, dirty, reason}`. `--keep-worktree` forces keep regardless.
 
-## The canonical loop
+## The recommended loop — stream events with the Monitor tool
+
+Drive Codex **event-driven**: spawn without waiting, then arm the **Monitor tool** with `codex.py watch`. Each state change (a question, a plan, completion) streams to you as one notification — you never poll or re-issue a wait.
+
+```bash
+# 1. Spawn + send the task; returns immediately with result.monitor (the watch command).
+python3 ${SKILL_DIR}/scripts/codex.py start --no-wait \
+  --task "Build /tmp/site/index.html for a dentist; ask me 2-5 questions first." \
+  --slug dentist --in tab --expect /tmp/site/index.html
+```
+
+2. **Arm the Monitor tool** with `result.monitor` (it carries `command` + `timeout_ms` + `persistent`). Each stdout line the watch prints becomes one notification — a JSON verdict.
+3. React to each streamed event with a short side command, and let the watch report the next state:
+   - a question (`awaiting_clarification`) → `codex.py reply --session <id> --text "<answer>" --no-wait`
+   - a plan (`awaiting_approval`) → present `result.plan` to the user, then `reply --session <id> --approve --no-wait` (or `--reject`, or `--text "<revisions>"`)
+   - a permission gate → **auto-approved for you** (an `auto_approved` event; nothing to do)
+4. On verified success (marker printed AND every `--expect` artifact present) the watch emits `completed` then `ended`/`auto_closed` and **closes the pane itself** — the session is done.
+
+The watch is read-only (except auto-approving gates and the final close), so a `reply`/`status` runs fine while it's live (the lock only guards spawns). Pass `--no-close` to keep the pane open, `--no-auto-approve` to surface gates instead.
+
+## One-shot alternative — background a blocking verb
+
+When you'd rather drive turn-by-turn (or can't use Monitor), background a blocking verb and read its single verdict:
 
 ```bash
 # Background it (run_in_background: true) so the harness notifies you on exit.
 python3 ${SKILL_DIR}/scripts/codex.py start \
-  --task "Refactor src/foo.py to remove duplication; keep behavior identical." --expect src/foo.py
+  --task "Refactor src/foo.py to remove duplication; keep behavior identical." --slug fix-foo --expect src/foo.py
 # Read the verdict, run result.next_action.command, repeat until state: completed, then:
 python3 ${SKILL_DIR}/scripts/codex.py end --session <id>
 ```
@@ -96,6 +119,8 @@ Act on `next_action`, per state/reason:
 | `working` / `timeout` | Didn't settle within `--timeout` (still running) | `await --session <id>` (optionally larger `--timeout`). |
 | `no_signal` / `no_signal` | Turn ended with no marker/question/menu, no resume | Read `transcript_tail`; may be done w/o a marker, or stuck. `status` to recheck. |
 | `exited` / `pane_gone` | The pane/process is gone | `start` a fresh task (no resume in v1). |
+| `auto_approved` / `permission_request` | **(watch only)** A permission gate was auto-approved for you | Nothing — the watch keeps streaming. |
+| `ended` / `auto_closed` | **(watch only)** Verified complete; pane closed + state deleted | Done — the watch exited. |
 
 **Clarifications can chain** — Codex may ask several in a row (e.g. a free-text question, then a multiple-choice widget); each `reply` can surface the next one. That's expected, not a swallowed answer — keep following `next_action` until `completed` (or `awaiting_approval`).
 
@@ -112,10 +137,14 @@ Act on `next_action`, per state/reason:
 - **Session continuity** — keyed on the stable terminal_id and re-resolved each call, so pane-slot renumbering never breaks a handle; pass only the durable `session` id.
 - **Bounded, clean verdict** — `transcript_tail` is the agent's final message with chrome/MCP-noise/diff-log stripped, capped by lines **and** chars (no bloat).
 - **Cleanup** — `end` closes the pane (and its dedicated tab) and deletes state; `sessions` prunes dead ones.
+- **Event streaming** — `watch` emits one JSON verdict per *real* state change (de-duped by content signature) for the Monitor tool, so you react to questions/plans/completion as they happen, never polling.
+- **Auto-plan** — a task mentioning a plan engages `/plan` automatically (override `--no-plan`); the plan is captured in full and surfaced for approve/revise.
+- **Auto-approve + self-close** — `watch` auto-approves Codex's (rare, YOLO) permission gates and closes the pane on verified success (marker + `--expect`), so a clean run finishes hands-free.
+- **Concurrency** — the cross-process lock guards only the spawn (label/branch check-then-create), so a long-running `watch` never blocks a concurrent `reply`/`status`, and parallel sessions don't serialize.
 
 ## Plan mode
 
-`codex.py start --plan --task "…"` → `awaiting_approval`/`plan_approval` with the **full plan in `result.plan`** and the menu in `result.options`. `reply --approve` to implement, `--reject` to keep planning, `--choice N` for another path. After approving, `await` rides the build through its work bursts to `completed`.
+Plan mode engages **automatically when the task mentions a plan** (the word plan/plans/planning, case-insensitive) — or force it with `--plan`, disable with `--no-plan`. Codex proposes a plan and the verdict is `awaiting_approval`/`plan_approval` with the **full plan in `result.plan`** and the menu in `result.options`. `reply --approve` to implement, `--reject` to keep planning, `--choice N` for another path, or `--text "<revisions>"` to refine. Under `watch` the plan arrives as a streamed event (present it to the user, then approve/revise); under the one-shot flow, `await` after approving rides the build to `completed`.
 
 ## Beyond one Codex
 
@@ -130,7 +159,8 @@ For parallel fleets, other agents (Pi/Claude/OpenCode/Hermes), or custom tooling
 
 ## Hard rules
 
-- For Codex, reach for `codex.py` first, and **background** the blocking verbs (that's what gives you the notification).
+- For Codex, reach for `codex.py` first. Prefer the **Monitor-driven flow** (`start --no-wait` → arm the Monitor tool with `result.monitor`'s `watch` command → react with `reply --no-wait`); otherwise **background** the blocking verbs (that's what gives you the one-shot notification).
+- A streamed `watch` event is a background notification, **not** a user reply — act on it (answer/approve), don't treat it as the human answering you.
 - Always pass `--slug` (required). Pick `--in pane` for quick side-tasks (default), `--in tab` for visually-revisited work, `--in space` for fully isolated runs. Add `--worktree` when the task changes code and you want git isolation.
 - Act on `result.next_action`, not a screen scrape. `idle`/`done` ≠ "complete" — trust `state`/`reason`.
 - Pass only the durable `session` id across calls (never a captured pane_id — slots renumber). Always `end` when finished.

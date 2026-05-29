@@ -1,13 +1,15 @@
 # claude-code-herdr-plugin
 
-> Unofficial · v1.1.0 · MIT · Not affiliated with the herdr project or Anthropic.
+> Unofficial · v1.2.0 · MIT · Not affiliated with the herdr project or Anthropic.
 
-**Drive a Codex sub-agent from Claude Code through a herdr pane, and get back one JSON verdict per turn — no screen-scraping, no status polling.**
+**Drive a Codex sub-agent from Claude Code through a herdr pane — stream one JSON verdict per state change via the Monitor tool, or get one verdict per blocking turn. No screen-scraping, no status polling.**
 
 ```
-Claude Code ──run a codex.py verb in the background──▶  Codex (in a herdr pane)
-     ▲                                                        │
-     └────────  one JSON verdict (state + next_action)  ◀─────┘
+                ┌── start --no-wait ──▶ Codex (in a herdr pane)
+Claude Code ────┤                              │
+                └◀── watch: one JSON verdict ───┘   (question · plan · completed · auto-closed)
+                     per state change, streamed
+                     to the Monitor tool
 ```
 
 ---
@@ -114,17 +116,24 @@ Full surface:
 ```
 codex.py start  --task "<p>" --slug <safe-name>
                 [--in pane|tab|space]  [--worktree] [--keep] [--keep-worktree]
-                [--plan] [--expect PATH]... [--cwd DIR]
+                [--plan | --no-plan] [--expect PATH]... [--cwd DIR]
                 [--marker STR] [--timeout 600] [--no-wait]
-codex.py send   --session <id> --message "<p>" [--expect PATH]... [--timeout 600]
-codex.py reply  --session <id> (--text "…" | --choice N | --approve | --reject) [--expect PATH]...
+codex.py watch  --session <id> [--expect PATH]... [--no-auto-approve] [--no-close] [--timeout 1800]
+                # STREAM one JSON verdict per state change (JSONL) — arm with the Monitor tool
+codex.py send   --session <id> --message "<p>" [--expect PATH]... [--no-wait] [--timeout 600]
+codex.py reply  --session <id> (--text "…" | --choice N | --approve | --reject) [--no-wait] [--expect PATH]...
 codex.py await  --session <id> [--expect PATH]... [--timeout 600]
 codex.py status --session <id> [--expect PATH]...      # one-shot, no wait
 codex.py end    --session <id>                          # teardown per mode + delete state
 codex.py sessions                                       # list live, prune dead
 ```
 
-`--slug` is required. Python injects the completion marker and the "ask me if unsure" discipline; you supply no other scaffolding.
+`--slug` is required. Python injects the completion marker and the "ask me if unsure" discipline; you supply no other scaffolding. Plan mode auto-engages when the task mentions a plan (`--no-plan` to disable).
+
+### Two ways to drive it
+
+- **Event-driven (recommended):** `start --no-wait` returns a `result.monitor` block; arm the **Monitor tool** with its `watch` command. The watch streams one verdict per state change — a question, a plan (full text, for approve/revise), completion — and **self-closes the pane on verified success**. React with `reply --no-wait`; permission gates are auto-approved.
+- **One-shot:** background a blocking `start`/`send`/`reply`/`await`; each prints one verdict and exits (the harness notifies you). Drive turn-by-turn.
 
 ---
 
