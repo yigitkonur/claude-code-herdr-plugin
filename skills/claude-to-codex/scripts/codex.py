@@ -586,7 +586,10 @@ def cmd_end(args):
     if rec is None:
         return _fail("end", "not_found", "NO_SESSION", f"No session '{args.session}'.",
                      False, "Nothing to clean up.", session=args.session, exit_code=4)
-    td = _teardown(rec)
+    # Closing the pane/tab/workspace can shift herdr's focus (esp. space mode);
+    # capture+restore so teardown never moves the human's view.
+    with _core.preserve_focus():
+        td = _teardown(rec)
     summary = "Session ended " + _teardown_summary(td) + ", state deleted."
     _emit("end", ok=True, session=args.session, result={
         "state": "ended", "reason": "cleaned_up", "summary": summary,
@@ -669,7 +672,8 @@ def cmd_watch(args):
             verified = result.get("reason") == "marker_verified" or (
                 bool(args.expect) and all(a.get("exists") for a in result.get("artifacts", [])))
             if auto_close and verified:
-                td = _teardown(rec)
+                with _core.preserve_focus():
+                    td = _teardown(rec)
                 _watch_event(args.session, "ended", "auto_closed",
                              "Task verified complete; " + _teardown_summary(td) + ", state deleted.",
                              intent="nothing", result=result,

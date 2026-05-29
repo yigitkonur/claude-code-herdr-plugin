@@ -22,6 +22,7 @@ Verified facts this encodes (from live Codex testing):
     a STANDALONE output line, never as a substring.
   - The status event can precede the menu render by >1s -> re-check loop.
 """
+import contextlib
 import json
 import os
 import re
@@ -230,6 +231,34 @@ def close_pane(pane_id, socket_path=SOCKET_PATH):
 
 def close_workspace(workspace_id, socket_path=SOCKET_PATH):
     return rpc("workspace.close", {"workspace_id": workspace_id}, socket_path)
+
+
+def focused_workspace_id(socket_path=SOCKET_PATH):
+    """The workspace_id herdr currently has focused (the human's view), or None."""
+    resp = rpc("workspace.list", {}, socket_path)
+    for w in resp.get("result", {}).get("workspaces", []):
+        if w.get("focused"):
+            return w.get("workspace_id")
+    return None
+
+
+@contextlib.contextmanager
+def preserve_focus(socket_path=SOCKET_PATH):
+    """Guarantee the human's focused workspace is unchanged across the body.
+
+    Creating or closing a workspace can shift herdr's focus even with focus=False
+    (verified: an --in space spawn+teardown moved the view to an adjacent workspace).
+    We capture the focused workspace before, and if it moved after, focus it back —
+    so the spawn/teardown is net-zero on the human's view (the unfocused-spawn
+    invariant). No-op when focus can't be determined (e.g. not inside herdr)."""
+    before = focused_workspace_id(socket_path)
+    try:
+        yield
+    finally:
+        if before:
+            after = focused_workspace_id(socket_path)
+            if after and after != before:
+                rpc("workspace.focus", {"workspace_id": before}, socket_path)
 
 
 def pane_rename(pane_id, label, socket_path=SOCKET_PATH):
@@ -512,34 +541,36 @@ def spawn_codex_space(workspace_label, inner_label, cwd=None, argv=None,
     Returns spawn_codex_tab's dict augmented with `workspace_id` (the new
     workspace id — caller stores it to close on session end).
     """
-    wc_params = {"focus": False, "label": workspace_label}
-    if cwd:
-        wc_params["cwd"] = cwd
-    wc = rpc("workspace.create", wc_params, socket_path)
-    if "error" in wc:
-        raise HerdrError("SPAWN_FAILED", f"workspace.create failed: {wc['error']}")
-    workspace_id = wc["result"]["workspace"]["workspace_id"]
-    root_pane_id = wc["result"]["root_pane"]["pane_id"]
-    try:
-        info = spawn_codex_tab(workspace_id, inner_label, cwd=cwd, argv=argv,
-                               socket_path=socket_path)
-    except HerdrError:
+    # Creating a workspace (even focus=False) can shift the human's view; keep it put.
+    with preserve_focus(socket_path):
+        wc_params = {"focus": False, "label": workspace_label}
+        if cwd:
+            wc_params["cwd"] = cwd
+        wc = rpc("workspace.create", wc_params, socket_path)
+        if "error" in wc:
+            raise HerdrError("SPAWN_FAILED", f"workspace.create failed: {wc['error']}")
+        workspace_id = wc["result"]["workspace"]["workspace_id"]
+        root_pane_id = wc["result"]["root_pane"]["pane_id"]
         try:
-            close_workspace(workspace_id, socket_path)
+            info = spawn_codex_tab(workspace_id, inner_label, cwd=cwd, argv=argv,
+                                   socket_path=socket_path)
+        except HerdrError:
+            try:
+                close_workspace(workspace_id, socket_path)
+            except HerdrError:
+                pass
+            raise
+        # Close the workspace's leftover root shell. This renumbers panes, so
+        # re-resolve Codex's pane id from its stable terminal_id afterwards.
+        try:
+            close_pane(root_pane_id, socket_path)
+            live = _pane_id_for_terminal(info["terminal_id"], socket_path)
+            if live:
+                info["pane_id"] = live
         except HerdrError:
             pass
-        raise
-    # Close the workspace's leftover root shell. This renumbers panes, so
-    # re-resolve Codex's pane id from its stable terminal_id afterwards.
-    try:
-        close_pane(root_pane_id, socket_path)
-        live = _pane_id_for_terminal(info["terminal_id"], socket_path)
-        if live:
-            info["pane_id"] = live
-    except HerdrError:
-        pass
-    info["workspace_id"] = workspace_id
-    return info
+        info["workspace_id"] = workspace_id
+        return info
 
 
 # Backwards-compat alias: the old single entry point. Removed in commit 3 once

@@ -187,6 +187,35 @@ assert codex._content_sig(_q1) == codex._content_sig(dict(_q1))
 assert codex._content_sig(_q1) != codex._content_sig(_q2)
 print("ok   watch_signature: same state same sig; changed content -> new sig")
 
+# preserve_focus: restores the pre-existing focused workspace if the body shifts it,
+# and is a no-op when focus is unchanged (so the human's view never moves).
+_orig_rpc = _core.rpc
+def _pf_rpc(seq, calls):
+    def rpc(method, params, socket_path=_core.SOCKET_PATH, timeout=10):
+        if method == "workspace.list":
+            ws = seq.pop(0) if seq else seq_last[0]
+            seq_last[0] = ws
+            return {"result": {"workspaces": [{"workspace_id": ws, "focused": True}]}}
+        if method == "workspace.focus":
+            calls.append(params["workspace_id"]); return {"result": {}}
+        return {"result": {}}
+    seq_last = [seq[-1] if seq else None]
+    return rpc
+try:
+    calls = []
+    _core.rpc = _pf_rpc(["A", "B"], calls)   # focus A before, B after the body -> restore A
+    with _core.preserve_focus():
+        pass
+    assert calls == ["A"], f"expected restore to A, got {calls}"
+    calls2 = []
+    _core.rpc = _pf_rpc(["A", "A"], calls2)  # unchanged -> no focus call
+    with _core.preserve_focus():
+        pass
+    assert calls2 == [], f"no shift must not focus, got {calls2}"
+finally:
+    _core.rpc = _orig_rpc
+print("ok   preserve_focus: restores original focus on shift, no-op when unchanged")
+
 # transcript_tail must be clean: drop the Codex banner box, the ›-prefixed prompt
 # echo / composer placeholder, and Codex's internal-skill reads — keep the real
 # agent line. (All three leaked in live short-turn retests.)
