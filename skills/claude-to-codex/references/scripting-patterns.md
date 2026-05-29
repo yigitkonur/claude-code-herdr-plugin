@@ -23,16 +23,29 @@ other `references/` files.
 ```
 codex.py start  --task "<p>" --slug <safe-name>
                 [--in pane|tab|space] [--worktree] [--keep] [--keep-worktree]
-                [--plan] [--expect PATH]... [--cwd DIR]
+                [--plan | --no-plan] [--expect PATH]... [--cwd DIR]
                 [--marker STR] [--timeout 600] [--no-wait]
-codex.py send   --session <id> --message "<p>" [--expect PATH]... [--timeout 600]
+codex.py watch  --session <id> [--expect PATH]... [--no-auto-approve] [--no-close] [--timeout 1800]
+                # STREAMS one JSON line per state change (JSONL) — arm with the Monitor tool
+codex.py send   --session <id> --message "<p>" [--expect PATH]... [--no-wait] [--timeout 600]
 codex.py reply  --session <id> (--text "…" | --choice N | --approve | --reject)
-                [--expect PATH]... [--timeout 600]
+                [--no-wait] [--expect PATH]... [--timeout 600]
 codex.py await  --session <id> [--expect PATH]... [--timeout 600]
 codex.py status --session <id> [--expect PATH]...      # one-shot, no wait
 codex.py end    --session <id>                          # close pane + delete state
 codex.py sessions                                       # list live, prune dead
 ```
+
+**Two drive modes.** *Event-driven (recommended):* `start --no-wait` returns a
+`result.monitor` block; arm the **Monitor tool** with its `watch` command. `watch`
+is a long-running read-only process that prints one envelope **per line (JSONL)**
+each time Codex reaches a new settled state (de-duped by a content signature), so
+each line becomes one Monitor notification. It auto-approves permission gates
+(`--no-auto-approve` to surface), surfaces plans/questions as events, and auto-closes
+the pane on verified success (`--no-close` to keep). React with `reply --no-wait` and
+let the watch report the next state. *One-shot:* background a blocking verb and read
+its single pretty-printed envelope. The cross-process lock guards only the spawn, so a
+`reply`/`status` runs fine while a `watch` is live.
 
 **The contract (audit-agentic-cli):** pure JSON on stdout (diagnostics on stderr),
 one stable envelope, semantic exit codes, non-interactive, every verdict carries a
@@ -44,9 +57,11 @@ markers and craft no prompt scaffolding.
 ```jsonc
 { "ok": true, "schema_version": "v1", "command": "start", "session": "cdx-3f9a",
   "result": {
-    "state": "completed|awaiting_clarification|awaiting_approval|permission_gate|working|no_signal|exited",
+    "state": "completed|awaiting_clarification|awaiting_approval|permission_gate|working|no_signal|exited|"
+             "auto_approved|ended",   // auto_approved/ended are watch-only stream events
     "reason": "marker_verified|marker_unverified|artifacts_present|reported_done|free_text_question|"
-              "multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
+              "multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone|"
+              "auto_closed|cleaned_up",
     "summary": "<=200 chars", "plan": "<full plan — never truncated>",
     "questions": ["…"], "options": [{"key":"1","label":"…","recommended":true}],
     "marker_found": true, "artifacts": [{"path":"…","exists":true,"bytes":4561}],
