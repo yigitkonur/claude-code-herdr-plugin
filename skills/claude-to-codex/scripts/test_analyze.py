@@ -163,6 +163,13 @@ fix = _core.analyze("done", stale_tail, MARK, [], "x", "codex.py",
 assert fix["reason"] == "no_signal", f"screen-scoped analyze should ignore stale Q, got {fix['reason']}"
 print("ok   stale_question_scoped_to_screen: visible-screen scoping suppresses stale scrollback Q")
 
+# free_text_question must NOT also ship the numbered question lines as pick-one options.
+_nq = _core.analyze("done", f"1. What name?\n2. What tone?\n› Find and fix a bug\n{STATUSBAR}",
+                    MARK, [], "x", "codex.py")
+assert _nq["reason"] == "free_text_question", f"expected free_text_question, got {_nq['reason']}"
+assert _nq["options"] == [], f"free_text_question should clear options, got {_nq['options']}"
+print("ok   free_text_no_options: numbered questions don't leak into options[]")
+
 # Auto-plan detection: the word plan/plans/planning (whole word) engages plan mode;
 # planet/casual prose does not. --no-plan wins; --plan forces.
 import types as _types

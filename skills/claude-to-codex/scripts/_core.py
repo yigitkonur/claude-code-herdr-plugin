@@ -1034,8 +1034,11 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
                               "Approve to implement, or --reject to keep planning. Plan is in result.plan.")
         elif questions:
             # Open questions (lines ending in '?') are answered with text — even
-            # when numbered. Numbering alone does NOT make them pick-one options.
+            # when numbered. Numbering alone does NOT make them pick-one options, so
+            # drop any options parsed off the numbered question lines (they'd otherwise
+            # ship in the verdict and read as a spurious pick-one menu).
             state, reason = "awaiting_clarification", "free_text_question"
+            options = []
             summary = "Codex asked a question and is waiting for your answer."
             next_action = _na("answer", f'reply --session <id> --text "<answer>"',
                               "Answer the question(s) in result.questions (text addresses all of them).")
