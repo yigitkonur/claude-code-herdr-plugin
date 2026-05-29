@@ -94,7 +94,8 @@ Between launch and notification you're **free to do other work**. **Always backg
 { "ok": true, "schema_version": "v1", "command": "start", "session": "cdx-3f9a",
   "result": {
     "state":  "completed|awaiting_clarification|awaiting_approval|permission_gate|working|no_signal|exited",
-    "reason": "marker_verified|marker_unverified|artifacts_present|reported_done|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone",
+    //         watch also streams two info events: "auto_approved" (a gate it approved) and "ended" (self-closed)
+    "reason": "marker_verified|marker_unverified|artifacts_present|reported_done|free_text_question|multiple_choice|plan_approval|permission_request|working|timeout|no_signal|pane_gone|auto_closed",
     "summary": "<=200 chars", "plan": "<full plan text — NEVER truncated — when present>",
     "questions": ["…"], "options": [{"key":"1","label":"…","recommended":true}],
     "marker_found": true, "artifacts": [{"path":"…","exists":true,"bytes":4561}],

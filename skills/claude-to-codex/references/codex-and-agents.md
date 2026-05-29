@@ -1,14 +1,21 @@
 # Codex (and other agents) — verified behavior
 
-Everything in this file was confirmed by driving a live Codex CLI (v0.132.0,
-gpt-5.x) through herdr while authoring this skill. Where a finding generalizes
-to Claude/Pi/OpenCode/Hermes it's noted; where it's Codex-specific it's flagged.
+Everything in this file was confirmed by driving a live Codex CLI (v0.132–v0.134,
+gpt-5.x) through herdr while authoring this skill, and re-verified on v0.134. Where a
+finding generalizes to Claude/Pi/OpenCode/Hermes it's noted; where it's Codex-specific
+it's flagged.
 
 > **You normally don't apply any of this by hand — `scripts/codex.py` encodes it.**
 > This file is the *why* behind that tool: the live-verified Codex behaviors its
 > heuristics are built on. Read it to reason about a `codex.py` verdict, to debug
 > a surprising state, or to drive Codex raw. The mapping of each behavior to the
 > code is summarized in the last section, **"What codex.py automates."**
+>
+> These behaviors are the same whichever way you drive: the **recommended path is the
+> event-driven Monitor/`watch` flow** (`start --no-wait` → arm the Monitor tool → one
+> JSON verdict streamed per state change, auto-approve gates, self-close on success);
+> the one-shot blocking-verb flow still works. The verb surface lives in `SKILL.md` and
+> `scripting-patterns.md` — this file is purely the underlying Codex behavior.
 
 ## How an integration maps agent events to herdr states
 
@@ -199,3 +206,8 @@ Each `codex.py` session gets its **own tab** (Finding 2). **Verified:** closing 
 | Marker dropped on a multi-turn follow-up | `send`/`reply --text` re-inject a terse marker reminder |
 | Pane-slot / tab-id renumbering | session keyed on terminal_id; `end` closes pane only |
 | MCP/502 noise, startup banner box, prompt echo, internal-skill reads | all stripped from `transcript_tail` |
+| Stale prompt in scrollback misread during an idle blip | interactive state (question/menu/widget/marker) read from the **visible screen**, not deep scrollback |
+| Polling a TUI for every state change is wasteful | `watch` streams one JSON verdict per *real* state change (JSONL, de-duped) for the Monitor tool |
+| Rare YOLO permission gate stalls an unattended run | `watch` auto-approves it (`--no-auto-approve` to surface) |
+| Forgetting to tear down a finished session | `watch` self-closes the pane on verified success (`--no-close` to keep) |
+| A long `watch` would block a concurrent `reply`/`status` | the cross-process lock guards only the spawn section, not the wait |
