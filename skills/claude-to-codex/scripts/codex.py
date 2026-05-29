@@ -373,30 +373,39 @@ def cmd_start(args):
     # First send is race-prone right after spawn; verify it landed (re-send if eaten).
     _core.send_task_verified(pane_id, _wrap_task(args.task, marker))
     if args.no_wait:
+        mon = _monitor_hint(session_id, args.expect, args.timeout)
         _emit("start", ok=True, session=session_id, result={
             "state": "working", "reason": "no_wait", "summary": "Task sent; not waiting.",
             "plan": None, "questions": [], "options": [], "marker_found": False,
             "artifacts": [], "transcript_tail": "",
-            "monitor": _monitor_hint(session_id, args.expect, args.timeout),
+            "monitor": mon,
             "next_action": {"intent": "monitor",
-                            "command": _watch_cmd(session_id, args.expect),
+                            "command": mon["command"],
                             "why": "Arm the Monitor tool with result.monitor to stream "
                                    "state changes (questions/plan/completion) as events."}})
         return 0
     return _verdict("start", session_id, pane_id, marker, args.expect, args.timeout)
 
 
-def _watch_cmd(session_id, expect):
-    """The `codex.py watch` command line for a session (used as the Monitor command)."""
+def _watch_cmd(session_id, expect, watch_timeout):
+    """The `codex.py watch` command line for a session (used as the Monitor command).
+    Pins --timeout so the watch's own lifetime matches the Monitor's cap."""
     extra = "".join(f" --expect {shlex.quote(p)}" for p in (expect or []))
-    return f"python3 {SELF} watch --session {session_id}{extra}"
+    return f"python3 {SELF} watch --session {session_id} --timeout {int(watch_timeout)}{extra}"
 
 
 def _monitor_hint(session_id, expect, timeout):
-    """A ready-to-use Monitor tool invocation for the orchestrator to arm a watch."""
-    return {"command": _watch_cmd(session_id, expect),
+    """A ready-to-use Monitor tool invocation for the orchestrator to arm a watch.
+
+    The watch self-terminates on completion/exit, so the Monitor cap is only a safety
+    net — but it MUST exceed the watch's own --timeout, or the Monitor would kill a
+    still-working watch (e.g. a multi-minute plan build) before it can report. We give
+    the watch a generous lifetime (>= 30 min, or the caller's timeout) and set the
+    Monitor cap just above it."""
+    wt = max(int(timeout), 1800)
+    return {"command": _watch_cmd(session_id, expect, wt),
             "description": f"codex {session_id}: stream state changes",
-            "timeout_ms": max(60000, int(timeout) * 1000),
+            "timeout_ms": (wt + 60) * 1000,
             "persistent": False}
 
 

@@ -7,13 +7,12 @@ description: Drive a Codex sub-agent from Claude Code over a herdr pane. ALWAYS 
 
 ## What this is
 
-You can spawn **Codex** (also Pi/Claude/OpenCode/Hermes) into a **herdr** side pane and drive it from Bash. For Codex, you need **one tool: `scripts/codex.py`** — it absorbs every sharp edge (spawn timing, lost sends, "finished vs paused?", plan truncation, pane renumbering, cleanup) and returns **one JSON verdict**. The whole model is three steps:
+You can spawn **Codex** (also Pi/Claude/OpenCode/Hermes) into a **herdr** side pane and drive it from Bash. For Codex, you need **one tool: `scripts/codex.py`** — it absorbs every sharp edge (spawn timing, lost sends, "finished vs paused?", plan truncation, pane renumbering, cleanup) and returns **structured JSON verdicts**. Two ways to drive it:
 
-1. Run a `codex.py` verb **in the background** (Bash tool, `run_in_background: true`).
-2. On exit, the harness **notifies you** with its stdout — one JSON envelope.
-3. Read `result.state`; run `result.next_action.command`. Repeat until `completed`, then `end`.
+- **Event-driven (recommended):** `start --no-wait` to spawn, then arm the **Monitor tool** with the returned `result.monitor` command (`codex.py watch`). It **streams** one JSON verdict per state change — a question, a plan, completion — as notifications. You react with `reply --no-wait`; it auto-approves permission gates and self-closes the pane on verified success. See **"The recommended loop"** below.
+- **One-shot:** background a blocking verb (`start`/`send`/`reply`/`await`, `run_in_background: true`). It blocks until Codex settles, prints **one** JSON verdict, and exits — which auto-notifies you. Read `result.state`, run `result.next_action.command`, repeat until `completed`, then `end`.
 
-You never scrape a screen, poll status, or sequence raw sends. Everything beyond one Codex (fleets, other agents, raw herdr) lives in `references/`.
+Either way you never scrape a screen, poll status, or sequence raw sends. Everything beyond one Codex (fleets, other agents, raw herdr) lives in `references/`.
 
 ## Invoke this skill when
 
