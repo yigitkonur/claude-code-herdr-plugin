@@ -389,7 +389,8 @@ def cmd_status(args):
     else:
         time.sleep(_core.SETTLE_DELAY)
         result = _core.analyze(st, _core.read_tail(pane_id), rec.get("marker"),
-                               args.expect, args.session, SELF)
+                               args.expect, args.session, SELF,
+                               screen=_core.read_screen(pane_id))
     _emit("status", ok=True, session=args.session, result=result)
     return 0
 

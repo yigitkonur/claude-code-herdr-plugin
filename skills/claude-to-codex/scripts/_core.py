@@ -61,12 +61,12 @@ LIVE_LINES = 24                # the CURRENT-prompt region at the bottom of the 
                                # screen; interactive state (question/menu/widget/plan-
                                # menu/marker) is detected here so a stale prompt left in
                                # scrollback during an idle blip can't be re-reported.
-SETTLE_DELAY = 0.8             # status event can beat the screen paint
-RECHECK_TRIES = 5              # re-read while a long plan/menu finishes painting
-RECHECK_DELAY = 1.0
+SETTLE_DELAY = 0.8             # status event can beat the screen paint; also the cadence
+                               # at which the settle loop re-reads to detect a stable screen
+RECHECK_DELAY = 1.0            # poll cadence while watching for a resume / late paint
 # A bare turn-end (idle/done, no marker/question/menu) is ambiguous: Codex often
-# emits short idle blips BETWEEN work bursts while implementing (verified). Before
-# concluding "no_signal", give it this long to resume working.
+# emits short idle blips BETWEEN work bursts while implementing (verified). After the
+# screen looks stable, give it this long to resume working or paint a late menu.
 NO_SIGNAL_GRACE = 6.0
 REGISTER_TIMEOUT = 20          # codex SessionStart hook registers within ~5s
 # Codex registers (SessionStart -> idle) BEFORE it can accept input: it keeps
@@ -1041,85 +1041,103 @@ def analyze(status, tail, marker=None, expect=None, session_id=None, self_cmd="c
     }
 
 
+def _exited_result(self_cmd):
+    return {"state": "exited", "reason": "pane_gone",
+            "summary": "The Codex pane is gone (process exited or closed).",
+            "plan": None, "questions": [], "options": [], "marker_found": False,
+            "artifacts": [], "transcript_tail": "",
+            "next_action": {"intent": "start",
+                            "command": f'python3 {self_cmd} start --task "<your task>"',
+                            "why": "Session ended (Codex exited or pane closed); start a fresh task."}}
+
+
+def _screen_sig(text):
+    """Whitespace-normalized screen content, so trailing-space jitter between reads
+    isn't seen as a change."""
+    return "\n".join(ln.rstrip() for ln in (text or "").splitlines())
+
+
 def settle_and_analyze(pane_id, marker, expect, session_id, timeout, self_cmd,
                        socket_path=SOCKET_PATH):
-    """Wait for Codex to settle, then analyze — but treat a bare turn-end as
-    possibly transient. Returns (result_dict, timed_out:bool).
+    """Wait for Codex to truly settle, then analyze. Returns (result_dict, timed_out).
 
-    A turn ending at idle/done with no marker/question/menu does NOT mean the
-    task is over: Codex emits idle blips between work bursts, and a just-submitted
-    action (approve/answer) leaves the pane briefly at the old settled state
-    before it flips to working. So on `no_signal` we (a) re-read for render lag,
-    then (b) give Codex a grace window to resume; only if it stays put do we
-    report no_signal. All bounded by `timeout`.
+    A single settle event is NOT trusted: Codex emits idle/done blips between work
+    bursts and paints long plans/menus several seconds AFTER the status event, and a
+    just-submitted action leaves the pane briefly at the old settled state. So we ride
+    the turn until the VISIBLE screen is STABLE across two settled reads — meaning the
+    turn truly ended and finished painting — then, only for an ambiguous bare turn-end
+    (no_signal), give a brief window to catch a resume (status -> working) or a late
+    paint (a menu finishing). Interactive state is read from the visible screen;
+    the plan/transcript from recent scrollback. Everything is bounded by `timeout`.
     """
     start = time.time()
-    status = current_status(pane_id, socket_path)
-    if status is None:
-        return ({"state": "exited", "reason": "pane_gone",
-                 "summary": "The Codex pane is gone (process exited or closed).",
-                 "plan": None, "questions": [], "options": [], "marker_found": False,
-                 "artifacts": [], "transcript_tail": "",
-                 "next_action": {"intent": "start",
-                                 "command": f'python3 {self_cmd} start --task "<your task>"',
-                                 "why": "Session ended (Codex exited or pane closed); start a fresh task."}}, False)
-    timed_out = False
-    if status not in SETTLED:
-        settled = wait_for_settle(pane_id, timeout, socket_path)
-        if settled is None:
-            timed_out = True
-            status = current_status(pane_id, socket_path) or "working"
-        else:
-            status = settled
-
     def _remaining():
         return timeout - (time.time() - start)
 
-    while True:
+    def _analyze_now(st):
+        screen = read_screen(pane_id, 48, socket_path)
+        tail = read_tail(pane_id, socket_path=socket_path)
+        return screen, analyze(st, tail, marker, expect, session_id, self_cmd, screen=screen)
+
+    status = current_status(pane_id, socket_path)
+    if status is None:
+        return _exited_result(self_cmd), False
+    if status not in SETTLED:
+        settled = wait_for_settle(pane_id, max(0.0, _remaining()), socket_path)
+        if settled is None:
+            _, result = _analyze_now(status)
+            return _as_timeout(result, self_cmd, session_id), True
+        status = settled
+
+    prev_sig = None
+    result = None
+    while _remaining() > 0:
         time.sleep(SETTLE_DELAY)
-        result = analyze(status, read_tail(pane_id, socket_path=socket_path),
-                         marker, expect, session_id, self_cmd)
-        if result["reason"] != "no_signal" or timed_out or _remaining() <= 0:
-            break
-        # (a) render lag — a menu/marker may still be painting after the event.
-        tries = 0
-        while result["reason"] == "no_signal" and tries < RECHECK_TRIES and _remaining() > 0:
-            time.sleep(RECHECK_DELAY)
-            result = analyze(status, read_tail(pane_id, socket_path=socket_path),
-                             marker, expect, session_id, self_cmd)
-            tries += 1
+        st = current_status(pane_id, socket_path)
+        if st is None:
+            return _exited_result(self_cmd), False
+        if st not in SETTLED:
+            # Codex resumed working -> ride to the next settle.
+            nxt = wait_for_settle(pane_id, max(0.0, _remaining()), socket_path)
+            if nxt is None:
+                break
+            status, prev_sig = nxt, None
+            continue
+        status = st
+        screen, result = _analyze_now(status)
+        sig = _screen_sig(screen)
+        if sig != prev_sig:
+            prev_sig = sig               # still painting -> keep waiting
+            continue
         if result["reason"] != "no_signal":
-            break
-        # (b) transient turn-end. Within the grace budget, keep re-reading the
-        # SCREEN — a menu/marker/question may still be painting (a plan-approval
-        # menu can lag its plan text by several seconds) — AND watch for Codex
-        # resuming work. Conclude no_signal only if neither materializes.
+            return result, False         # stable, definitive actionable/terminal state
+        # Stable bare turn-end: maybe a between-bursts blip or a menu about to paint.
         grace_end = time.time() + min(NO_SIGNAL_GRACE, max(0.0, _remaining()))
         resumed = False
         while time.time() < grace_end and _remaining() > 0:
             time.sleep(RECHECK_DELAY)
-            result = analyze(status, read_tail(pane_id, socket_path=socket_path),
-                             marker, expect, session_id, self_cmd)
-            if result["reason"] != "no_signal":
-                break                  # an actionable state painted late
-            if current_status(pane_id, socket_path) == "working":
+            st = current_status(pane_id, socket_path)
+            if st is None:
+                return _exited_result(self_cmd), False
+            if st not in SETTLED:
                 resumed = True
                 break
-        if result["reason"] != "no_signal":
-            break                      # caught the late-painted state
+            if _screen_sig(read_screen(pane_id, 48, socket_path)) != sig:
+                resumed = True           # a menu/marker painted late
+                break
         if not resumed:
-            break                      # stayed settled -> genuine no_signal
-        nxt = wait_for_settle(pane_id, max(0.0, _remaining()), socket_path)
-        if nxt is None:
-            timed_out = True
-            status = current_status(pane_id, socket_path) or "working"
-        else:
-            status = nxt               # resumed; re-analyze after the next settle
+            return result, False         # genuinely settled with nothing actionable
+        status, prev_sig = (current_status(pane_id, socket_path) or status), None
 
-    if timed_out:
-        result["state"], result["reason"] = "working", "timeout"
-        result["summary"] = "Codex did not settle within the timeout; still working."
-        result["next_action"] = {"intent": "wait",
-                                  "command": f"python3 {self_cmd} await --session {session_id}",
-                                  "why": "Re-enter the wait with a longer --timeout if needed."}
-    return result, timed_out
+    if result is None:
+        _, result = _analyze_now(status)
+    return _as_timeout(result, self_cmd, session_id), True
+
+
+def _as_timeout(result, self_cmd, session_id):
+    result["state"], result["reason"] = "working", "timeout"
+    result["summary"] = "Codex did not settle within the timeout; still working."
+    result["next_action"] = {"intent": "wait",
+                             "command": f"python3 {self_cmd} await --session {session_id}",
+                             "why": "Re-enter the wait with a longer --timeout if needed."}
+    return result
