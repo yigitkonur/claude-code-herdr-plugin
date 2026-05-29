@@ -245,13 +245,10 @@ def list_panes(socket_path=SOCKET_PATH):
     return resp.get("result", {}).get("panes", [])
 
 
-def wait_for_settle(pane_id, timeout, socket_path=SOCKET_PATH):
-    """Subscribe via the vendored client and block until the pane reaches a
-    settled status, or timeout. Returns the settled status, or None on timeout.
-
-    The client's Subscription handles connect + ack; we read its event stream
-    directly and set the socket timeout to the remaining budget before each read
-    so a multi-event wait still honors the overall deadline."""
+def _wait_for_status(pane_id, timeout, predicate, socket_path=SOCKET_PATH):
+    """Block until the pane's agent_status satisfies `predicate(status)`, or timeout.
+    Returns the matching status, or None on timeout. Subscribes to the pane's
+    status-changed events and honors the overall deadline across multiple events."""
     deadline = time.time() + timeout
     client = HerdrClient(socket_path, timeout=timeout)
     try:
@@ -274,10 +271,28 @@ def wait_for_settle(pane_id, timeout, socket_path=SOCKET_PATH):
             if not line:
                 continue
             st = json.loads(line).get("data", {}).get("agent_status")
-            if st in SETTLED:
+            if predicate(st):
                 return st
     finally:
         sub.close()
+
+
+def wait_for_settle(pane_id, timeout, socket_path=SOCKET_PATH):
+    """Block until the pane reaches a settled status, or timeout. Returns the
+    settled status, or None on timeout."""
+    return _wait_for_status(pane_id, timeout, lambda st: st in SETTLED, socket_path)
+
+
+def wait_for_working(pane_id, timeout, socket_path=SOCKET_PATH):
+    """Block until the pane LEAVES a settled status (Codex resumed working), or
+    timeout. Returns the new status, or None on timeout. `watch` uses this to wait
+    for the orchestrator's reply to take effect before reading the next state. If
+    the pane is already working, returns immediately."""
+    st = current_status(pane_id, socket_path)
+    if st is not None and st not in SETTLED:
+        return st
+    return _wait_for_status(pane_id, timeout, lambda s: s is not None and s not in SETTLED,
+                            socket_path)
 
 
 # ---------------------------------------------------------------------------

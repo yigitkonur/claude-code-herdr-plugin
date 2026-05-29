@@ -163,6 +163,30 @@ fix = _core.analyze("done", stale_tail, MARK, [], "x", "codex.py",
 assert fix["reason"] == "no_signal", f"screen-scoped analyze should ignore stale Q, got {fix['reason']}"
 print("ok   stale_question_scoped_to_screen: visible-screen scoping suppresses stale scrollback Q")
 
+# Auto-plan detection: the word plan/plans/planning (whole word) engages plan mode;
+# planet/casual prose does not. --no-plan wins; --plan forces.
+import types as _types
+assert codex._wants_plan("do a comprehensive plan first and present it")
+assert codex._wants_plan("Plan the migration") and codex._wants_plan("update the planning doc")
+assert not codex._wants_plan("build a website for a dentist")
+assert not codex._wants_plan("explain the planet's orbit")
+_fa = _types.SimpleNamespace(no_plan=False, plan=False, task="just build it")
+assert codex._effective_plan(_fa) is False
+_fa.task = "make a plan first"; assert codex._effective_plan(_fa) is True
+_fa.no_plan = True; assert codex._effective_plan(_fa) is False              # --no-plan wins
+_fa.no_plan, _fa.plan, _fa.task = False, True, "build x"
+assert codex._effective_plan(_fa) is True                                   # --plan forces
+print("ok   auto_plan_detection: 'plan' word engages plan mode; --no-plan wins, --plan forces")
+
+# A watch state-change signature changes when the actionable content changes, so
+# `watch` emits once per real transition (not on every re-read of the same state).
+_q1 = {"state": "awaiting_clarification", "reason": "free_text_question",
+       "questions": ["A?"], "options": [], "marker_found": False, "plan": None}
+_q2 = dict(_q1, questions=["B?"])
+assert codex._content_sig(_q1) == codex._content_sig(dict(_q1))
+assert codex._content_sig(_q1) != codex._content_sig(_q2)
+print("ok   watch_signature: same state same sig; changed content -> new sig")
+
 # transcript_tail must be clean: drop the Codex banner box, the ›-prefixed prompt
 # echo / composer placeholder, and Codex's internal-skill reads — keep the real
 # agent line. (All three leaked in live short-turn retests.)

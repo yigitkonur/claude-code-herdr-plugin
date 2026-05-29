@@ -49,9 +49,12 @@ EXIT CODES
   5  internal error
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
+import re
+import shlex
 import sys
 import time
 import uuid
@@ -65,11 +68,21 @@ SCHEMA = "v1"
 LOCK_PATH = os.path.join(_core.STATE_DIR, "codex.py.lock")
 
 
-def _with_process_lock(fn):
+@contextlib.contextmanager
+def _spawn_lock():
+    """Serialize ONLY the spawn critical section across concurrent codex.py calls.
+
+    Spawning does a check-then-create on labels (build_label queries tab/pane/
+    workspace lists, picks a free suffix, then creates) and on worktree branches —
+    two concurrent spawns could pick the same name. We hold an exclusive flock just
+    for that section. We deliberately do NOT hold it during the blocking wait/watch
+    or input sends, so a long-running `watch` never blocks a concurrent `reply`/
+    `status`, and parallel sessions don't serialize. Pane-slot renumbering from
+    concurrent spawns is already handled by re-resolving pane_id from terminal_id."""
     os.makedirs(_core.STATE_DIR, exist_ok=True)
     with open(LOCK_PATH, "w") as lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        return fn()
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +93,43 @@ def _emit(command, ok=True, session=None, result=None, error=None):
         "ok": ok, "schema_version": SCHEMA, "command": command,
         "session": session, "result": result, "error": error,
     }, indent=2))
+
+
+def _emit_line(command, ok=True, session=None, result=None, error=None):
+    """One-line JSON envelope — the streaming form `watch` emits (JSONL: each line
+    is one event/notification for the Monitor tool). Flushed so events arrive live."""
+    print(json.dumps({
+        "ok": ok, "schema_version": SCHEMA, "command": command,
+        "session": session, "result": result, "error": error,
+    }), flush=True)
+
+
+_PLAN_INTENT_RE = re.compile(r"\bplan(s|ning)?\b", re.I)
+
+
+def _wants_plan(task):
+    """True if the task mentions planning (the word plan/plans/planning). Used to
+    auto-engage /plan so a 'do a plan first' task lands in plan mode without a flag."""
+    return bool(_PLAN_INTENT_RE.search(task or ""))
+
+
+def _effective_plan(args):
+    """Resolve plan mode: --no-plan wins, then --plan, else infer from the task text."""
+    if getattr(args, "no_plan", False):
+        return False
+    if getattr(args, "plan", False):
+        return True
+    return _wants_plan(getattr(args, "task", ""))
+
+
+def _content_sig(result):
+    """Signature of a verdict's actionable content, so `watch` emits once per real
+    state change — not on every re-read of the same waiting state."""
+    return json.dumps([result.get("state"), result.get("reason"),
+                       result.get("questions"),
+                       [o.get("key") for o in result.get("options", [])],
+                       bool(result.get("marker_found")), bool(result.get("plan"))],
+                      sort_keys=True)
 
 
 def _fail(command, klass, code, message, retryable, suggestion, session=None, exit_code=2):
@@ -269,37 +319,48 @@ def _spawn_for_mode(plan):
 
 def cmd_start(args):
     marker = _marker_for(args)
-    plan, code = _resolve_spawn_plan(args)
-    if plan is None:
-        return code
-    label = plan["label"]
-    session_id = "cdx-" + uuid.uuid4().hex[:4]
-    try:
-        info = _spawn_for_mode(plan)
-    except _core.HerdrError:
-        # Spawn failure leaves no herdr resources for pane/tab modes (the helpers
-        # roll back internally) but the worktree may have been materialized
-        # already — release it so we don't leak it on a failed start.
-        wt = plan.get("worktree")
-        if wt:
-            _core.worktree_remove(wt["repo"], wt["path"], branch=wt["branch"])
-        raise
-    rec = {"session": session_id, "label": label, "terminal_id": info["terminal_id"],
-           "pane_id": info["pane_id"], "tab_id": info.get("tab_id"), "agent": info["agent"],
-           "marker": marker, "plan_mode": bool(args.plan), "created": time.time(),
-           "last_state": "spawned", "plan": None,
-           "slug": plan["slug"], "mode": plan["mode"], "keep": plan["keep"],
-           "workspace_id": info.get("workspace_id") if plan["mode"] == "space"
-                            else (plan.get("tab", {}).get("workspace_id")
-                                  if plan["mode"] == "tab" else None),
-           "caller_tab_id": plan.get("pane", {}).get("caller_tab_id")
-                            if plan["mode"] == "pane" else None,
-           "worktree": plan.get("worktree"),
-           "keep_worktree": bool(plan.get("worktree") and plan["worktree"].get("keep"))}
-    _core.save_session(rec)
-    pane_id = info["pane_id"]
+    do_plan = _effective_plan(args)
+    if do_plan and not args.plan:
+        print(f"[codex.py] task mentions a plan; engaging plan mode (use --no-plan to disable).",
+              file=sys.stderr)
+    # Only the spawn (check-then-create on labels/branches) needs the cross-process
+    # lock; the send and the wait below run lock-free so a watch/reply can run in
+    # parallel.
+    with _spawn_lock():
+        plan, code = _resolve_spawn_plan(args)
+        if plan is None:
+            return code
+        label = plan["label"]
+        session_id = "cdx-" + uuid.uuid4().hex[:4]
+        try:
+            info = _spawn_for_mode(plan)
+        except _core.HerdrError:
+            # Spawn failure leaves no herdr resources for pane/tab modes (the helpers
+            # roll back internally) but the worktree may have been materialized
+            # already — release it so we don't leak it on a failed start.
+            wt = plan.get("worktree")
+            if wt:
+                _core.worktree_remove(wt["repo"], wt["path"], branch=wt["branch"])
+            raise
+        rec = {"session": session_id, "label": label, "terminal_id": info["terminal_id"],
+               "pane_id": info["pane_id"], "tab_id": info.get("tab_id"), "agent": info["agent"],
+               "marker": marker, "plan_mode": do_plan, "created": time.time(),
+               "last_state": "spawned", "plan": None,
+               "slug": plan["slug"], "mode": plan["mode"], "keep": plan["keep"],
+               "workspace_id": info.get("workspace_id") if plan["mode"] == "space"
+                                else (plan.get("tab", {}).get("workspace_id")
+                                      if plan["mode"] == "tab" else None),
+               "caller_tab_id": plan.get("pane", {}).get("caller_tab_id")
+                                if plan["mode"] == "pane" else None,
+               "worktree": plan.get("worktree"),
+               "keep_worktree": bool(plan.get("worktree") and plan["worktree"].get("keep"))}
+        _core.save_session(rec)
+    # Lock released. A concurrent spawn may have renumbered pane slots between the
+    # spawn and the first send, so re-resolve the live pane_id from the stable
+    # terminal_id before using it (otherwise the task could be sent to the wrong pane).
+    pane_id = _core.resolve_pane_id(rec) or info["pane_id"]
 
-    if args.plan:
+    if do_plan:
         _core.send_text_enter(pane_id, "/plan")
         # Wait for plan mode to actually engage (status bar shows "Plan mode")
         # rather than a blind sleep, so the task lands in plan mode.
@@ -316,11 +377,27 @@ def cmd_start(args):
             "state": "working", "reason": "no_wait", "summary": "Task sent; not waiting.",
             "plan": None, "questions": [], "options": [], "marker_found": False,
             "artifacts": [], "transcript_tail": "",
-            "next_action": {"intent": "wait",
-                            "command": f"python3 {SELF} await --session {session_id}",
-                            "why": "Re-enter the wait when ready."}})
+            "monitor": _monitor_hint(session_id, args.expect, args.timeout),
+            "next_action": {"intent": "monitor",
+                            "command": _watch_cmd(session_id, args.expect),
+                            "why": "Arm the Monitor tool with result.monitor to stream "
+                                   "state changes (questions/plan/completion) as events."}})
         return 0
     return _verdict("start", session_id, pane_id, marker, args.expect, args.timeout)
+
+
+def _watch_cmd(session_id, expect):
+    """The `codex.py watch` command line for a session (used as the Monitor command)."""
+    extra = "".join(f" --expect {shlex.quote(p)}" for p in (expect or []))
+    return f"python3 {SELF} watch --session {session_id}{extra}"
+
+
+def _monitor_hint(session_id, expect, timeout):
+    """A ready-to-use Monitor tool invocation for the orchestrator to arm a watch."""
+    return {"command": _watch_cmd(session_id, expect),
+            "description": f"codex {session_id}: stream state changes",
+            "timeout_ms": max(60000, int(timeout) * 1000),
+            "persistent": False}
 
 
 def cmd_send(args):
@@ -403,11 +480,11 @@ def _legacy_mode(rec):
     return "tab", False, None
 
 
-def cmd_end(args):
-    rec = _core.load_session(args.session)
-    if rec is None:
-        return _fail("end", "not_found", "NO_SESSION", f"No session '{args.session}'.",
-                     False, "Nothing to clean up.", session=args.session, exit_code=4)
+def _teardown(rec):
+    """Close the pane (and workspace/worktree per mode) and delete session state.
+    Shared by `end` and `watch`'s auto-close. Returns a summary dict
+    {mode, pane_state, workspace_state, worktree_summary}."""
+    session = rec["session"]
     mode = rec.get("mode")
     if mode is None:
         mode, keep, workspace_id = _legacy_mode(rec)
@@ -425,10 +502,10 @@ def cmd_end(args):
             pane_state = "kept"
         else:
             try:
-                # Closing the codex pane auto-closes its dedicated tab when it is
-                # the sole pane (verified). We deliberately do NOT close_tab by
-                # stored id: tab ids renumber when a lower tab closes, so a stale
-                # tab_id can close a sibling session's tab.
+                # Closing the codex pane auto-closes its dedicated tab when it is the
+                # sole pane (verified). We deliberately do NOT close_tab by stored id:
+                # tab ids renumber when a lower tab closes, so a stale tab_id can close
+                # a sibling session's tab.
                 _core.close_pane(pane_id)
                 pane_state = "closed"
             except _core.HerdrError:
@@ -468,23 +545,129 @@ def cmd_end(args):
                 worktree_summary = {"kept": True, "branch": wt["branch"], "path": wt["path"],
                                     "ahead": status["ahead"], "dirty": status["dirty"],
                                     "reason": reason}
-    _core.delete_session(args.session)
-    summary = f"Session ended ({mode}); pane {pane_state}"
-    if workspace_state:
-        summary += f", workspace {workspace_state}"
-    if worktree_summary:
-        if worktree_summary.get("kept"):
-            summary += f", worktree kept ({worktree_summary.get('reason')})"
-        elif worktree_summary.get("removed"):
+    _core.delete_session(session)
+    return {"mode": mode, "pane_state": pane_state,
+            "workspace_state": workspace_state, "worktree_summary": worktree_summary}
+
+
+def _teardown_summary(td):
+    summary = f"({td['mode']}); pane {td['pane_state']}"
+    if td["workspace_state"]:
+        summary += f", workspace {td['workspace_state']}"
+    ws = td["worktree_summary"]
+    if ws:
+        if ws.get("kept"):
+            summary += f", worktree kept ({ws.get('reason')})"
+        elif ws.get("removed"):
             summary += ", worktree removed"
         else:
             summary += ", worktree removal attempted"
-    summary += ", state deleted."
+    return summary
+
+
+def cmd_end(args):
+    rec = _core.load_session(args.session)
+    if rec is None:
+        return _fail("end", "not_found", "NO_SESSION", f"No session '{args.session}'.",
+                     False, "Nothing to clean up.", session=args.session, exit_code=4)
+    td = _teardown(rec)
+    summary = "Session ended " + _teardown_summary(td) + ", state deleted."
     _emit("end", ok=True, session=args.session, result={
         "state": "ended", "reason": "cleaned_up", "summary": summary,
         "plan": None, "questions": [], "options": [], "marker_found": False, "artifacts": [],
         "transcript_tail": "", "next_action": {"intent": "nothing", "command": None, "why": ""},
-        "worktree": worktree_summary})
+        "worktree": td["worktree_summary"]})
+    return 0
+
+
+def _watch_event(session, state, reason, summary, intent="wait", command=None, why="",
+                 result=None, **extra):
+    """Build + emit one watch JSONL event with a sane envelope shape."""
+    base = {"state": state, "reason": reason, "summary": summary,
+            "plan": None, "questions": [], "options": [], "marker_found": False,
+            "artifacts": [], "transcript_tail": "",
+            "next_action": {"intent": intent, "command": command, "why": why}}
+    if result:
+        base = {**base, **{k: result.get(k) for k in
+                           ("plan", "questions", "options", "marker_found",
+                            "artifacts", "transcript_tail") if k in result}}
+    base.update(extra)
+    _emit_line("watch", session=session, result=base)
+
+
+def cmd_watch(args):
+    """Stream one JSON line per real state change until the task completes or the
+    pane exits. Built to be armed with the Monitor tool: each stdout line is one
+    event/notification. Read-only except for auto-approving permission gates and
+    auto-closing on verified success — it never blocks a concurrent reply."""
+    resolved, code = _resolve("watch", args.session)
+    if resolved is None:
+        return code
+    rec, _ = resolved
+    marker = rec.get("marker")
+    auto_approve = not args.no_auto_approve
+    auto_close = not args.no_close
+    deadline = time.time() + args.timeout
+
+    def _remaining():
+        return max(0.0, deadline - time.time())
+
+    last_sig = None
+    while _remaining() > 0:
+        pane_id = _core.resolve_pane_id(rec)
+        if pane_id is None:
+            _watch_event(args.session, "exited", "pane_gone",
+                         "The Codex pane is gone (process exited or closed).",
+                         intent="start",
+                         command=f'python3 {SELF} start --task "<your task>" --slug <name>',
+                         why="Session ended; start a fresh task (no resume in v1).")
+            return 0
+        result, _timed = _core.settle_and_analyze(
+            pane_id, marker, args.expect, args.session, _remaining(), SELF)
+        cur = _core.load_session(args.session)          # persist last state + plan
+        if cur is not None:
+            cur["last_state"] = result.get("state")
+            if result.get("plan"):
+                cur["plan"] = result["plan"]
+            _core.save_session(cur)
+            rec = cur
+        state = result.get("state")
+
+        # Permission gate -> auto-approve without surfacing (Codex runs YOLO; gates
+        # are rare and low-risk). Disable with --no-auto-approve to surface them.
+        if state == "permission_gate" and auto_approve:
+            _core.send_keys(pane_id, ["Enter"])
+            _watch_event(args.session, "auto_approved", "permission_request",
+                         "Auto-approved a permission gate; Codex resumed.",
+                         why="Watch continues; the next state will stream.", result=result)
+            last_sig = None
+            _core.wait_for_working(pane_id, _remaining())
+            continue
+
+        sig = _content_sig(result)
+        if sig != last_sig:
+            _emit_line("watch", session=args.session, result=result)
+            last_sig = sig
+
+        if state == "completed":
+            verified = result.get("reason") == "marker_verified" or (
+                bool(args.expect) and all(a.get("exists") for a in result.get("artifacts", [])))
+            if auto_close and verified:
+                td = _teardown(rec)
+                _watch_event(args.session, "ended", "auto_closed",
+                             "Task verified complete; " + _teardown_summary(td) + ", state deleted.",
+                             intent="nothing", result=result,
+                             worktree=td["worktree_summary"])
+            return 0
+        if state == "exited":
+            return 0
+        if state == "working":          # timeout while still working -> keep riding
+            continue
+        # awaiting_* / no_signal: wait for the orchestrator's reply to take effect
+        # (Codex resumes working), then loop to stream the next state. If nothing
+        # happens before the deadline, end the watch cleanly.
+        if _core.wait_for_working(pane_id, _remaining()) is None:
+            return 0
     return 0
 
 
@@ -537,7 +720,11 @@ def build_parser():
     s.add_argument("--keep-worktree", action="store_true",
                    help="Never auto-remove the worktree on `end` (overrides the merge check). "
                         "Also CODEX_KEEP_WORKTREE=1.")
-    s.add_argument("--plan", action="store_true", help="Enter plan mode (/plan) before the task.")
+    s.add_argument("--plan", action="store_true",
+                   help="Force plan mode (/plan) before the task. Plan mode is also engaged "
+                        "automatically when the task mentions a plan.")
+    s.add_argument("--no-plan", action="store_true",
+                   help="Never engage plan mode, even if the task mentions a plan.")
     s.add_argument("--cwd", default=None, help="Working directory for the pane.")
     s.add_argument("--marker", default=None, help="Completion marker (auto-generated if omitted).")
     s.add_argument("--no-wait", action="store_true", help="Send the task but don't wait.")
@@ -564,6 +751,18 @@ def build_parser():
     add_wait_flags(s)
     s.set_defaults(fn=cmd_await)
 
+    s = sub.add_parser("watch", help="Stream one JSON line per state change (for the Monitor tool).")
+    s.add_argument("--session", required=True)
+    s.add_argument("--no-auto-approve", action="store_true",
+                   help="Surface permission gates instead of auto-approving them.")
+    s.add_argument("--no-close", action="store_true",
+                   help="Do not auto-close the pane on verified success.")
+    s.add_argument("--expect", action="append", default=[], metavar="PATH",
+                   help="Artifact to verify exists on completion (repeatable).")
+    s.add_argument("--timeout", type=int, default=1800,
+                   help="Max watch lifetime, seconds (default 1800).")
+    s.set_defaults(fn=cmd_watch)
+
     s = sub.add_parser("status", help="One-shot snapshot, no waiting.")
     s.add_argument("--session", required=True)
     s.add_argument("--expect", action="append", default=[], metavar="PATH")
@@ -581,7 +780,7 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     try:
-        return _with_process_lock(lambda: args.fn(args))
+        return args.fn(args)
     except _core.HerdrError as e:
         klass = "environment" if e.code == "HERDR_DOWN" else "internal"
         ec = 3 if e.code == "HERDR_DOWN" else 5
