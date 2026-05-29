@@ -1,6 +1,6 @@
 {
   "name": "claude-code-herdr-plugin",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Drive a Codex sub-agent from Claude Code through a herdr pane with one JSON verdict per turn — no screen-scraping, no status polling.",
   "author": {
     "name": "Yigit Konur"

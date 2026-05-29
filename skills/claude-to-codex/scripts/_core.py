@@ -114,7 +114,7 @@ _CHROME_RES = [
 # are NOT user/agent content. Used to recognise an EMPTY composer.
 _PLACEHOLDER_HINTS = re.compile(
     r"Find and fix a bug|Implement \{feature\}|Write tests for|Summarize recent|"
-    r"Run /review|Explain (this|the)|What does|Add a |Refactor ", re.I)
+    r"Run /review|Explain (this|the)|What does|Add a |Refactor |Improve documentation", re.I)
 _UNCERTAINTY_RE = re.compile(
     r"\b(i think|probably|not sure|unclear|i assume|i'?ll assume|might be|"
     r"could be|let me know|please confirm|which would you|do you want)\b", re.I
@@ -647,7 +647,7 @@ def send_task_verified(pane_id, text, socket_path=SOCKET_PATH, tries=4):
             return True
         tail = read_screen(pane_id, 80, socket_path)
         if composer_has_text(tail):
-            send_keys(pane_id, ["Enter"], socket_path)
+            rpc("pane.send_input", {"pane_id": pane_id, "keys": ["Enter"]}, socket_path)
             time.sleep(1.1)
             if current_status(pane_id, socket_path) == "working":
                 return True
